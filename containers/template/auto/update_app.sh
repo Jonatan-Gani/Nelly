@@ -39,43 +39,53 @@ if [ -z "$GIT_REPO_URL" ] || [ -z "$BRANCH" ]; then
     exit 1
 fi
 
-# Step 1: Handle Git operations
-if [ -d "$APP_DIR" ]; then
-    if [ -d "$APP_DIR/.git" ]; then
-        log "Pulling latest changes from $BRANCH branch in $GIT_REPO_URL..."
-        cd "$APP_DIR" && git pull origin "$BRANCH" || {
-            log "Error: Failed to pull latest changes."
-            exit 1
-        }
+# Step 1: Ask user about fetching repository content
+read -p "Do you want to update the repository content in the app folder? (y/n): " update_repo
+if [[ "$update_repo" =~ ^[yY] ]]; then
+    log "Fetching repository content from $GIT_REPO_URL (branch: $BRANCH)..."
+    
+    # Clean the app directory
+    if [ -d "$APP_DIR" ]; then
+        log "Cleaning up existing app directory..."
+        rm -rf "$APP_DIR/*"
     else
-        log "$APP_DIR exists but is not a Git repository. Reinitializing..."
-        rm -rf "$APP_DIR"
-        git clone -b "$BRANCH" "$GIT_REPO_URL" "$APP_DIR" || {
-            log "Error: Failed to clone repository."
+        mkdir -p "$APP_DIR"
+    fi
+
+    # Fetch repository content
+    ZIP_URL="${GIT_REPO_URL%.git}/archive/$BRANCH.zip"
+    wget -O repo.zip "$ZIP_URL" || {
+        log "Error: Failed to download repository archive."
+        exit 1
+    }
+    unzip -o repo.zip -d "$APP_DIR" || {
+        log "Error: Failed to extract repository archive."
+        rm repo.zip
+        exit 1
+    }
+    rm repo.zip
+    log "Repository content updated successfully."
+else
+    log "Skipped repository content update."
+fi
+
+# Step 2: Ask user about app-specific config.json update
+read -p "Do you want to update the app-specific config.json in the app folder? (y/n): " update_config
+if [[ "$update_config" =~ ^[yY] ]]; then
+    if [ -n "$APP_CONFIG" ]; then
+        log "Updating app-specific config.json in $APP_DIR..."
+        echo "$APP_CONFIG" > "$APP_DIR/config.json" || {
+            log "Error: Failed to update app-specific config.json."
             exit 1
         }
+        log "App-specific config.json updated successfully."
+    else
+        log "No app-specific config.json provided in config.json. Skipping."
     fi
 else
-    log "Cloning repository from $GIT_REPO_URL (branch: $BRANCH) into $APP_DIR..."
-    git clone -b "$BRANCH" "$GIT_REPO_URL" "$APP_DIR" || {
-        log "Error: Failed to clone repository."
-        exit 1
-    }
-fi
-log "Git operations completed successfully."
-
-# Step 2: Update app-specific config.json
-if [ -n "$APP_CONFIG" ]; then
-    log "Updating app-specific config.json in $APP_DIR..."
-    echo "$APP_CONFIG" > "$APP_DIR/config.json" || {
-        log "Error: Failed to update app-specific config.json."
-        exit 1
-    }
-    log "App-specific config.json updated successfully."
-else
-    log "No app-specific config.json provided in config.json. Skipping."
+    log "Skipped app-specific config.json update."
 fi
 
 # Final confirmation
-log "Application code updated successfully."
+log "Application content update process completed."
 echo "SUCCESS"
