@@ -39,21 +39,18 @@ run_script() {
 log "Starting update process for container: $(basename "$SCRIPT_DIR")"
 
 # Step 1: Sync Configurations
-run_script "$AUTO_DIR/sync_config.sh" || { log "Update process terminated at sync_config.sh"; exit 1; }
+run_script "$AUTO_DIR/config_mng.sh" || { log "Update process terminated at config_mng.sh"; exit 1; }
 
-# Step 2: Validate Configurations
-run_script "$AUTO_DIR/validate_config.sh" || { log "Update process terminated at validate_config.sh"; exit 1; }
-
-# Step 3: Update Application Code
+# Step 2: Update Application Code
 run_script "$AUTO_DIR/update_app.sh" || { log "Update process terminated at update_app.sh"; exit 1; }
 
-# Step 4: Build Docker Image
+# Step 3: Build Docker Image
 run_script "$AUTO_DIR/build_docker.sh" || { log "Update process terminated at build_docker.sh"; exit 1; }
 
-# Step 5: Manage Docker Container
+# Step 4: Manage Docker Container
 run_script "$AUTO_DIR/manage_docker.sh" || { log "Update process terminated at manage_docker.sh"; exit 1; }
 
-# Step 6: Cleanup Logs
+# Step 5: Cleanup Logs
 run_script "$AUTO_DIR/log_cleanup.sh" || { log "Update process terminated at log_cleanup.sh"; exit 1; }
 
 # End update process
