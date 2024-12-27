@@ -1,0 +1,1 @@
+* * * * * root echo "Cron is working" >> /var/log/cron_test.log 2>&1

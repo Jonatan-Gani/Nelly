@@ -1,0 +1,43 @@
+# Use a slim Python image (adjust version as needed)
+FROM python:3.9-slim
+# Placeholder for package installation (will be inserted by the script)
+# (Assuming 'cron' is included in your packages list)
+# Add custom bashrc behavior to confirm before exiting
+RUN echo 'trap "echo Warning: Exiting the container will stop it! Are you sure you want to exit? (y/n); read answer; if [ \"\$answer\" != \"y\" ]; then echo Exit canceled; bash; fi" EXIT' >> /root/.bashrc
+# Add a user for security purposes (you can keep this if needed for other processes)
+RUN useradd -ms /bin/bash $PROJECT_NAME
+# Create the app directory and set permissions
+RUN mkdir -p /home/$PROJECT_NAME/app/repo && \
+    chown -R $PROJECT_NAME:$PROJECT_NAME /home/$PROJECT_NAME/app
+# Copy the repository folder from the host to the container
+COPY repo /home/$PROJECT_NAME/app/repo
+# Copy the cron file into the container
+COPY cron /etc/cron.d/$PROJECT_NAME-cron
+# Set permissions and ownership for the cron file
+RUN chmod 0644 /etc/cron.d/$PROJECT_NAME-cron && \
+    chown root:root /etc/cron.d/$PROJECT_NAME-cron
+# Ensure /var/run has correct permissions
+RUN chmod 0755 /var/run && \
+    chown root:root /var/run
+# Create the cron log file and set permissions
+RUN touch /var/log/cron.log && \
+    chmod 0644 /var/log/cron.log && \
+    chown root:root /var/log/cron.log
+# Set permissions for the project user
+RUN chown -R $PROJECT_NAME:$PROJECT_NAME /home/$PROJECT_NAME && \
+    chmod -R u+rwx /home/$PROJECT_NAME
+# Update pip
+RUN pip install --upgrade pip
+
+# Install Python dependencies from requirements.txt
+RUN pip install -r /home/$PROJECT_NAME/app/repo/requirements.txt
+
+# **Start cron in the foreground**
+CMD ["cron", "-f"]
+
+# Optionally switch to the project user for further commands (commented out)
+# USER $PROJECT_NAME
+
+# Set the working directory
+WORKDIR /home/$PROJECT_NAME
+
