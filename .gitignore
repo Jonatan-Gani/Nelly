@@ -1,0 +1,8 @@
+# Ignore everything in the App directory
+/containers/*
+
+# Except the "template" folder
+!/containers/template/
+
+# Include everything inside the "template" folder
+!/containers/template/**
