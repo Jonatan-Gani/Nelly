@@ -23,6 +23,7 @@
     "git_url": "git@github.com:Jonatan-Gani/tamar_template.git",
     "branch": "master",
     "static_ip": "192.168.20.100",
+    "image_name": "test_image",
     "docker_run_options": "-p 8080:80",
     "packages": [
       "cron",

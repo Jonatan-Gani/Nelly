@@ -23,12 +23,22 @@ if [ ! -f "$CONFIG_FILE" ]; then
 fi
 
 IMAGE_NAME=$(jq -r '.container_config.image_name // "default_image"' "$CONFIG_FILE")
+PROJECT_NAME=$(jq -r '.container_config.project_name // "default_project"' "$CONFIG_FILE")
 PACKAGES=$(jq -r '.container_config.packages[]' "$CONFIG_FILE")
 
 # Step 1: Prepare temporary Dockerfile
 TEMP_DOCKERFILE="$SCRIPT_DIR/Dockerfile.temp"
 log "Creating temporary Dockerfile..."
 cp "$SCRIPT_DIR/../def/Dockerfile" "$TEMP_DOCKERFILE"
+
+# Define the PROJECT_NAME in the Dockerfile
+log "Setting up PROJECT_NAME in Dockerfile..."
+sed -i "/^FROM/a ARG PROJECT_NAME=$PROJECT_NAME\nENV PROJECT_NAME=\$PROJECT_NAME" "$TEMP_DOCKERFILE"
+
+# Update COPY commands to reflect correct paths
+log "Updating COPY commands in Dockerfile..."
+sed -i "s|COPY cron /etc/cron.d/project-cron|COPY ./def/cron /etc/cron.d/project-cron|g" "$TEMP_DOCKERFILE"
+sed -i "s|COPY app /home/app|COPY ./app /home/app|g" "$TEMP_DOCKERFILE"
 
 # Add package installation to Dockerfile
 if [ -n "$PACKAGES" ]; then
@@ -38,12 +48,14 @@ if [ -n "$PACKAGES" ]; then
 fi
 
 # Step 2: Build Docker image
-log "Building Docker image ($IMAGE_NAME)..."
-if ! docker build --no-cache -t "$IMAGE_NAME" -f "$TEMP_DOCKERFILE" "$SCRIPT_DIR/../app"; then
+log "Building Docker image ($IMAGE_NAME) with PROJECT_NAME=$PROJECT_NAME..."
+if ! docker build --no-cache --build-arg PROJECT_NAME="$PROJECT_NAME" -t "$IMAGE_NAME" -f "$TEMP_DOCKERFILE" "$SCRIPT_DIR/.."; then
     log "Error: Failed to build the Docker image."
     rm -f "$TEMP_DOCKERFILE"
     exit 1
 fi
+
+# Clean up the temporary Dockerfile
 rm -f "$TEMP_DOCKERFILE"
 
 log "Docker image built successfully."

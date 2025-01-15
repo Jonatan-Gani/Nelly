@@ -1,8 +1,9 @@
 # Use a slim Python image
 FROM python:3.9-slim
 
-# Placeholder for package installation (inserted by your script)
-# (Assuming necessary packages are installed)
+# Define project name
+ARG PROJECT_NAME=default_project
+ENV PROJECT_NAME=$PROJECT_NAME
 
 # Add a user for security purposes
 RUN useradd -ms /bin/bash $PROJECT_NAME
@@ -12,10 +13,10 @@ RUN mkdir -p /home/app && \
     chown -R $PROJECT_NAME:$PROJECT_NAME /home/app
 
 # Copy the repository folder from the host to the container
-COPY app /home/app
+COPY ./app /home/app
 
 # Copy the cron file into the container as a root cron job
-COPY cron /etc/cron.d/project-cron
+COPY ./def/cron /etc/cron.d/project-cron
 
 # Set permissions for the cron file (required for cron in /etc/cron.d)
 RUN chmod 0644 /etc/cron.d/project-cron
