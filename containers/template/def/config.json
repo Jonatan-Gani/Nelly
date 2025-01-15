@@ -1,27 +1,38 @@
 {
-rm -r old_tamar tamarrm -r old_tamar tamar	"nelly_config": {
-		"LOCAL_IP": "192.168.10.251",
-		"network_name": "Nelly_Network"
-		},
-	"app_config":{
-        	"SQL_credentials":{
-                	"DB_USER": "",
-                	"DB_PASSWORD": "",
-                	"DB_HOST": "",
-                	"DB_PORT": "",
-                	"DB_NAME": ""
-                	},
-        	"telegram_config":{
-                	"bot_token": "",
-                	"user_id_ls": []
-                	},
-        	"other":{
-                	"log_dir":null
-                	}
-  		},
-  	"git_url": "git@github.com:Jonatan-Gani/tamar_template.git",
-  	"branch": "master",
-  	"static_ip": "192.168.20.100",
-  	"docker_run_options": "-p 8080:80",
-  	"packages": ["cron", "python3-pip", "git", "libpq-dev", "gcc", "nano", "bash", "iputils-ping"]
+  "nelly_config": {
+    "LOCAL_IP": "192.168.10.251",
+    "network_name": "Nelly_Network"
+  },
+  "app_config": {
+    "SQL_credentials": {
+      "DB_USER": "",
+      "DB_PASSWORD": "",
+      "DB_HOST": "",
+      "DB_PORT": "",
+      "DB_NAME": ""
+    },
+    "telegram_config": {
+      "bot_token": "",
+      "user_id_ls": []
+    },
+    "other": {
+      "log_dir": null
+    }
+  },
+  "container_config": {
+    "git_url": "git@github.com:Jonatan-Gani/tamar_template.git",
+    "branch": "master",
+    "static_ip": "192.168.20.100",
+    "docker_run_options": "-p 8080:80",
+    "packages": [
+      "cron",
+      "python3-pip",
+      "git",
+      "libpq-dev",
+      "gcc",
+      "nano",
+      "bash",
+      "iputils-ping"
+    ]
+  }
 }

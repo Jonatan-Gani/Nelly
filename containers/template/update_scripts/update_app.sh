@@ -1,9 +1,12 @@
 #!/bin/bash
 
+echo "Application update Started ..."
+
 # Paths
 SCRIPT_DIR="$(dirname "$(realpath "$0")")"
 APP_DIR="$SCRIPT_DIR/../app"
 CONFIG_FILE="$SCRIPT_DIR/../def/config.json"
+TEMP_DIR="$SCRIPT_DIR/../temp_repo"  # Temporary directory for cloning the repository
 
 # Log file
 LOG_FILE="$SCRIPT_DIR/../logs/update_app.log"
@@ -30,12 +33,12 @@ if [ ! -f "$CONFIG_FILE" ]; then
     exit 1
 fi
 
-GIT_REPO_URL=$(jq -r '.git_url' "$CONFIG_FILE")
-BRANCH=$(jq -r '.branch' "$CONFIG_FILE")
-APP_CONFIG=$(jq -r '.app_config' "$CONFIG_FILE")
+# Extract values from the config structure
+GIT_REPO_URL=$(jq -r '.container_config.git_url' "$CONFIG_FILE")
+BRANCH=$(jq -r '.container_config.branch' "$CONFIG_FILE")
 
 if [ -z "$GIT_REPO_URL" ] || [ -z "$BRANCH" ]; then
-    log "Error: git_url or branch is missing in config.json."
+    log "Error: git_url or branch is missing in container_config."
     exit 1
 fi
 
@@ -43,7 +46,7 @@ fi
 read -p "Do you want to update the repository content in the app folder? (y/n): " update_repo
 if [[ "$update_repo" =~ ^[yY] ]]; then
     log "Fetching repository content from $GIT_REPO_URL (branch: $BRANCH)..."
-    
+
     # Clean the app directory
     if [ -d "$APP_DIR" ]; then
         log "Cleaning up existing app directory..."
@@ -52,38 +55,36 @@ if [[ "$update_repo" =~ ^[yY] ]]; then
         mkdir -p "$APP_DIR"
     fi
 
-    # Fetch repository content
-    ZIP_URL="${GIT_REPO_URL%.git}/archive/$BRANCH.zip"
-    wget -O repo.zip "$ZIP_URL" || {
-        log "Error: Failed to download repository archive."
+    # Create a temporary directory for cloning
+    if [ -d "$TEMP_DIR" ]; then
+        log "Removing existing temporary directory..."
+        rm -rf "$TEMP_DIR"
+    fi
+    mkdir -p "$TEMP_DIR"
+
+    # Clone the repository into the temporary directory
+    log "Cloning repository..."
+    git clone --branch "$BRANCH" --depth 1 "$GIT_REPO_URL" "$TEMP_DIR" || {
+        log "Error: Failed to clone repository."
+        rm -rf "$TEMP_DIR"
         exit 1
     }
-    unzip -o repo.zip -d "$APP_DIR" || {
-        log "Error: Failed to extract repository archive."
-        rm repo.zip
+
+    # Copy repository content to the app folder (excluding .git metadata)
+    log "Copying repository content to app folder..."
+    rsync -av --exclude='.git' "$TEMP_DIR/" "$APP_DIR/" || {
+        log "Error: Failed to copy repository content."
+        rm -rf "$TEMP_DIR"
         exit 1
     }
-    rm repo.zip
+
+    # Clean up the temporary directory
+    log "Cleaning up temporary directory..."
+    rm -rf "$TEMP_DIR"
+
     log "Repository content updated successfully."
 else
     log "Skipped repository content update."
-fi
-
-# Step 2: Ask user about app-specific config.json update
-read -p "Do you want to update the app-specific config.json in the app folder? (y/n): " update_config
-if [[ "$update_config" =~ ^[yY] ]]; then
-    if [ -n "$APP_CONFIG" ]; then
-        log "Updating app-specific config.json in $APP_DIR..."
-        echo "$APP_CONFIG" > "$APP_DIR/config.json" || {
-            log "Error: Failed to update app-specific config.json."
-            exit 1
-        }
-        log "App-specific config.json updated successfully."
-    else
-        log "No app-specific config.json provided in config.json. Skipping."
-    fi
-else
-    log "Skipped app-specific config.json update."
 fi
 
 # Final confirmation

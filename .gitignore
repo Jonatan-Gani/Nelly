@@ -6,3 +6,9 @@
 
 # Include everything inside the "template" folder
 !/containers/template/**
+
+# Ignore the content of the "app" folder inside the "template"
+/containers/template/app/*
+
+# Allow the "app" folder itself (to keep it as an empty folder)
+/containers/template/app/
