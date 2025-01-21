@@ -48,5 +48,4 @@ jq --argjson nellyConfig "$(jq '.' "$NELLY_CONFIG")" '.nelly_config = $nellyConf
 log "Configurations synchronized successfully."
 
 # Final confirmation
-log "Configuration management completed successfully."
-echo "SUCCESS"
+log "Configuration management completed - SUCCESS."

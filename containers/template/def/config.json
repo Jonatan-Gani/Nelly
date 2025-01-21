@@ -1,7 +1,6 @@
 {
   "nelly_config": {
-    "LOCAL_IP": "192.168.10.251",
-    "network_name": "Nelly_Network"
+    "LOCAL_IP": "192.168.10.251"
   },
   "app_config": {
     "SQL_credentials": {
@@ -20,11 +19,20 @@
     }
   },
   "container_config": {
-    "git_url": "git@github.com:Jonatan-Gani/tamar_template.git",
-    "branch": "master",
-    "static_ip": "192.168.20.100",
+    "container_name": "tamar_template",
     "image_name": "test_image",
-    "docker_run_options": "-p 8080:80",
+    "apps": [
+      {
+        "app_name": "tamar_template",
+        "git_url": "git@github.com:Jonatan-Gani/tamar_template.git",
+        "branch": "master"
+      }
+    ],
+    "network": {
+      "network_name": "Nelly_Network",
+      "static_ip": "192.168.20.100",
+      "docker_run_options": "-p 8080:80"
+    },
     "packages": [
       "cron",
       "python3-pip",

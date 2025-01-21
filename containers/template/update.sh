@@ -1,8 +1,11 @@
 #!/bin/bash
 
-# Define paths
+echo "Starting Update Process..."
+
+# Paths
 MAIN_DIR="$(dirname "$(realpath "$0")")"
 SCRIPTS_DIR="$MAIN_DIR/update_scripts"
+CONFIG_FILE="$MAIN_DIR/def/config.json"
 LOG_FILE="$MAIN_DIR/logs/update_logs.log"
 
 # Ensure log file exists
@@ -31,20 +34,17 @@ run_script() {
     local script_name=$(basename "$script_path")
     
     log "Starting $script_name..."
-    echo "Running $script_name..."
 
     # Check if the script exists
     if [ ! -f "$script_path" ]; then
         log "Error: Script $script_name does not exist at $script_path."
         return 1
     fi
-    echo "Checked if the script exists..."
+    log "Checked if the script exists..."
 
-    # Run the script directly
-    bash "$script_path"
-    exit_code=$?
-
-    echo "Ran the script..."
+    # Run the script and forward logs
+    bash "$script_path" 2>&1 | tee -a "$LOG_FILE"
+    exit_code=${PIPESTATUS[0]}
     
     # Check the exit code
     if [ $exit_code -eq 0 ]; then
@@ -56,10 +56,29 @@ run_script() {
     fi
 }
 
+# Validate config.json exists
+if [ ! -f "$CONFIG_FILE" ]; then
+    log "Error: Configuration file ($CONFIG_FILE) not found."
+    exit 1
+fi
 
+# Load container name and app details from config.json
+CONTAINER_NAME=$(jq -r '.container_config.container_name // "default_container"' "$CONFIG_FILE")
+IMAGE_NAME=$(jq -r '.container_config.image_name // "default_image"' "$CONFIG_FILE")
+NETWORK_NAME=$(jq -r '.container_config.network.network_name // "default_network"' "$CONFIG_FILE")
+
+if [ -z "$CONTAINER_NAME" ] || [ -z "$IMAGE_NAME" ] || [ -z "$NETWORK_NAME" ]; then
+    log "Error: Missing required container configuration (container_name, image_name, network_name)."
+    exit 1
+fi
+
+log "Using configuration:"
+log "   - Container Name: $CONTAINER_NAME"
+log "   - Image Name: $IMAGE_NAME"
+log "   - Network Name: $NETWORK_NAME"
 
 # Start update process
-log "Starting update process for container: $(basename "$MAIN_DIR")"
+log "Starting update process for container: $CONTAINER_NAME"
 
 # Ensure scripts have the correct permissions
 ensure_permissions
@@ -80,4 +99,4 @@ run_script "$SCRIPTS_DIR/manage_docker.sh" || { log "Update process terminated a
 run_script "$SCRIPTS_DIR/log_cleanup.sh" || { log "Update process terminated at log_cleanup.sh"; exit 1; }
 
 # End update process
-log "Update process completed successfully for container: $(basename "$MAIN_DIR")"
+log "Update process completed successfully for container: $CONTAINER_NAME"

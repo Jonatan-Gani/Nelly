@@ -1,4 +1,4 @@
-# Ignore everything in the App directory
+ls# Ignore everything in the App directory
 /containers/*
 
 # Except the "template" folder
@@ -12,3 +12,9 @@
 
 # Allow the "app" folder itself (to keep it as an empty folder)
 /containers/template/app/
+
+# Ignore the content of the "logs" folder inside the "template"
+/containers/template/logs/*
+
+# Allow the "logs" folder itself (to keep it as an empty folder)
+/containers/template/logs/

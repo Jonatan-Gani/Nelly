@@ -22,9 +22,22 @@ if [ ! -f "$CONFIG_FILE" ]; then
     exit 1
 fi
 
+# Extract values from the new config structure
 IMAGE_NAME=$(jq -r '.container_config.image_name // "default_image"' "$CONFIG_FILE")
-PROJECT_NAME=$(jq -r '.container_config.project_name // "default_project"' "$CONFIG_FILE")
+PROJECT_NAME=$(jq -r '.container_config.apps[0].app_name // "default_project"' "$CONFIG_FILE")
 PACKAGES=$(jq -r '.container_config.packages[]' "$CONFIG_FILE")
+
+# Check if the image name already exists
+if docker images --format "{{.Repository}}" | grep -q "^$IMAGE_NAME$"; then
+    log "Docker image ($IMAGE_NAME) already exists."
+    read -p "The image '$IMAGE_NAME' already exists. Do you want to overwrite it? (y/n): " overwrite
+    if [[ "$overwrite" != "y" && "$overwrite" != "Y" ]]; then
+        log "Build process aborted by user."
+        echo "Aborted"
+        exit 0
+    fi
+    log "Proceeding to overwrite the existing image ($IMAGE_NAME)."
+fi
 
 # Step 1: Prepare temporary Dockerfile
 TEMP_DOCKERFILE="$SCRIPT_DIR/Dockerfile.temp"

@@ -1,16 +1,18 @@
 #!/bin/bash
 
-echo "Application update Started ..."
+echo "Starting Application Update..."
 
 # Paths
 SCRIPT_DIR="$(dirname "$(realpath "$0")")"
+DEF_DIR="$SCRIPT_DIR/../def"
 APP_DIR="$SCRIPT_DIR/../app"
-CONFIG_FILE="$SCRIPT_DIR/../def/config.json"
-TEMP_DIR="$SCRIPT_DIR/../temp_repo"  # Temporary directory for cloning the repository
+TEMP_DIR="$SCRIPT_DIR/../temp_repo"
+LOG_DIR="$SCRIPT_DIR/../logs"
+CONFIG_FILE="$DEF_DIR/config.json"
+LOG_FILE="$LOG_DIR/update_app.log"
 
-# Log file
-LOG_FILE="$SCRIPT_DIR/../logs/update_app.log"
-mkdir -p "$(dirname "$LOG_FILE")"
+# Ensure necessary directories exist
+mkdir -p "$LOG_DIR"
 touch "$LOG_FILE"
 
 # Logging function
@@ -27,25 +29,30 @@ if ! command -v jq &> /dev/null; then
     }
 fi
 
-# Read configuration
+# Verify critical paths
 if [ ! -f "$CONFIG_FILE" ]; then
     log "Error: config.json not found at $CONFIG_FILE."
     exit 1
 fi
+if [ ! -d "$APP_DIR" ]; then
+    log "Error: App directory not found at $APP_DIR."
+    exit 1
+fi
 
 # Extract values from the config structure
-GIT_REPO_URL=$(jq -r '.container_config.git_url' "$CONFIG_FILE")
-BRANCH=$(jq -r '.container_config.branch' "$CONFIG_FILE")
+APP_NAME=$(jq -r '.container_config.apps[0].app_name // empty' "$CONFIG_FILE")
+GIT_REPO_URL=$(jq -r '.container_config.apps[0].git_url // empty' "$CONFIG_FILE")
+BRANCH=$(jq -r '.container_config.apps[0].branch // empty' "$CONFIG_FILE")
 
-if [ -z "$GIT_REPO_URL" ] || [ -z "$BRANCH" ]; then
-    log "Error: git_url or branch is missing in container_config."
+if [ -z "$APP_NAME" ] || [ -z "$GIT_REPO_URL" ] || [ -z "$BRANCH" ]; then
+    log "Error: Missing required fields (app_name, git_url, branch) in container_config.apps."
     exit 1
 fi
 
 # Step 1: Ask user about fetching repository content
 read -p "Do you want to update the repository content in the app folder? (y/n): " update_repo
 if [[ "$update_repo" =~ ^[yY] ]]; then
-    log "Fetching repository content from $GIT_REPO_URL (branch: $BRANCH)..."
+    log "Fetching repository content for app ($APP_NAME) from $GIT_REPO_URL (branch: $BRANCH)..."
 
     # Clean the app directory
     if [ -d "$APP_DIR" ]; then
@@ -88,5 +95,4 @@ else
 fi
 
 # Final confirmation
-log "Application content update process completed."
-echo "SUCCESS"
+log "Application content update process SUCCESS."
