@@ -23,9 +23,9 @@ if [ ! -f "$CONFIG_FILE" ]; then
 fi
 
 # Extract values from the new config structure
-IMAGE_NAME=$(jq -r '.container_config.image_name // "default_image"' "$CONFIG_FILE")
-PROJECT_NAME=$(jq -r '.container_config.apps[0].app_name // "default_project"' "$CONFIG_FILE")
-PACKAGES=$(jq -r '.container_config.packages[]' "$CONFIG_FILE")
+IMAGE_NAME=$(jq -r '.image_name // "default_image"' "$CONFIG_FILE")
+PROJECT_NAME=$(jq -r '.apps[0].app_name // "default_project"' "$CONFIG_FILE")
+PACKAGES=$(jq -r '.packages[]' "$CONFIG_FILE")
 
 # Check if the image name already exists
 if docker images --format "{{.Repository}}" | grep -q "^$IMAGE_NAME$"; then

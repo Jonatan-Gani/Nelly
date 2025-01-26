@@ -2,46 +2,32 @@
   "nelly_config": {
     "LOCAL_IP": "192.168.10.251"
   },
-  "app_config": {
-    "SQL_credentials": {
-      "DB_USER": "",
-      "DB_PASSWORD": "",
-      "DB_HOST": "",
-      "DB_PORT": "",
-      "DB_NAME": ""
-    },
-    "telegram_config": {
-      "bot_token": "",
-      "user_id_ls": []
-    },
-    "other": {
-      "log_dir": null
-    }
-  },
-  "container_config": {
-    "container_name": "tamar_template",
-    "image_name": "test_image",
-    "apps": [
-      {
-        "app_name": "tamar_template",
-        "git_url": "git@github.com:Jonatan-Gani/tamar_template.git",
-        "branch": "master"
+  "container_name": "tamar_template",
+  "image_name": "test_image",
+  "apps": [
+    {
+      "app_name": "tamar_template",
+      "git_url": "git@github.com:Jonatan-Gani/tamar_template.git",
+      "branch": "master",
+      "env": {
+        "DB_HOST": "ENV_DB_HOST_tamar_template",
+        "DB_PASS": "ENV_DB_PASS_tamar_template"
       }
-    ],
-    "network": {
-      "network_name": "Nelly_Network",
-      "static_ip": "192.168.20.100",
-      "docker_run_options": "-p 8080:80"
-    },
-    "packages": [
-      "cron",
-      "python3-pip",
-      "git",
-      "libpq-dev",
-      "gcc",
-      "nano",
-      "bash",
-      "iputils-ping"
-    ]
-  }
+    }
+  ],
+  "network": {
+    "network_name": "Nelly_Network",
+    "static_ip": "192.168.20.100",
+    "docker_run_options": "-p 8080:80"
+  },
+  "packages": [
+    "cron",
+    "python3-pip",
+    "git",
+    "libpq-dev",
+    "gcc",
+    "nano",
+    "bash",
+    "iputils-ping"
+  ]
 }

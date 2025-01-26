@@ -7,14 +7,17 @@ ls# Ignore everything in the App directory
 # Include everything inside the "template" folder
 !/containers/template/**
 
-# Ignore the content of the "app" folder inside the "template"
-/containers/template/app/*
+# Ignore the content of the "apps" folder inside the "template"
+/containers/template/apps/*
 
-# Allow the "app" folder itself (to keep it as an empty folder)
-/containers/template/app/
+# Allow the "apps" folder itself (to keep it as an empty folder)
+/containers/template/apps/
 
 # Ignore the content of the "logs" folder inside the "template"
 /containers/template/logs/*
 
 # Allow the "logs" folder itself (to keep it as an empty folder)
 /containers/template/logs/
+
+# Ignore the content of the ".env" the "template"
+containers/template/def/.env

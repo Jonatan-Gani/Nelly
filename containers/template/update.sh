@@ -63,9 +63,9 @@ if [ ! -f "$CONFIG_FILE" ]; then
 fi
 
 # Load container name and app details from config.json
-CONTAINER_NAME=$(jq -r '.container_config.container_name // "default_container"' "$CONFIG_FILE")
-IMAGE_NAME=$(jq -r '.container_config.image_name // "default_image"' "$CONFIG_FILE")
-NETWORK_NAME=$(jq -r '.container_config.network.network_name // "default_network"' "$CONFIG_FILE")
+CONTAINER_NAME=$(jq -r '.container_name // "default_container"' "$CONFIG_FILE")
+IMAGE_NAME=$(jq -r '.image_name // "default_image"' "$CONFIG_FILE")
+NETWORK_NAME=$(jq -r '.network.network_name // "default_network"' "$CONFIG_FILE")
 
 if [ -z "$CONTAINER_NAME" ] || [ -z "$IMAGE_NAME" ] || [ -z "$NETWORK_NAME" ]; then
     log "Error: Missing required container configuration (container_name, image_name, network_name)."
@@ -73,9 +73,9 @@ if [ -z "$CONTAINER_NAME" ] || [ -z "$IMAGE_NAME" ] || [ -z "$NETWORK_NAME" ]; t
 fi
 
 log "Using configuration:"
-log "   - Container Name: $CONTAINER_NAME"
-log "   - Image Name: $IMAGE_NAME"
-log "   - Network Name: $NETWORK_NAME"
+log "   - Container Name:   $CONTAINER_NAME"
+log "   - Image Name:       $IMAGE_NAME"
+log "   - Network Name:     $NETWORK_NAME"
 
 # Start update process
 log "Starting update process for container: $CONTAINER_NAME"

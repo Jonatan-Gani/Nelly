@@ -23,11 +23,11 @@ if [ ! -f "$CONFIG_FILE" ]; then
 fi
 
 # Extract configuration values
-CONTAINER_NAME=$(jq -r '.container_config.container_name // "default_container"' "$CONFIG_FILE")
-IMAGE_NAME=$(jq -r '.container_config.image_name // "default_image"' "$CONFIG_FILE")
-NETWORK_NAME=$(jq -r '.container_config.network.network_name // "default_network"' "$CONFIG_FILE")
-STATIC_IP=$(jq -r '.container_config.network.static_ip // empty' "$CONFIG_FILE")
-DOCKER_RUN_OPTIONS=$(jq -r '.container_config.network.docker_run_options // empty' "$CONFIG_FILE")
+CONTAINER_NAME=$(jq -r '.container_name // "default_container"' "$CONFIG_FILE")
+IMAGE_NAME=$(jq -r '.image_name // "default_image"' "$CONFIG_FILE")
+NETWORK_NAME=$(jq -r '.network.network_name // "default_network"' "$CONFIG_FILE")
+STATIC_IP=$(jq -r '.network.static_ip // empty' "$CONFIG_FILE")
+DOCKER_RUN_OPTIONS=$(jq -r '.network.docker_run_options // empty' "$CONFIG_FILE")
 
 # Step 1: Check if the container already exists
 if docker ps -a --format "{{.Names}}" | grep -q "^$CONTAINER_NAME$"; then
