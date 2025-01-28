@@ -46,9 +46,6 @@ fi
 # ----------------------------------------------------------------------------------
 # 3. Load Local .env (Secrets) Into Shell Environment
 # ----------------------------------------------------------------------------------
-# If you want your .env lines like ENV_DB_HOST_tamar_template="1.2.3.4" to be recognized,
-# we source them so they become shell variables (i.e., $ENV_DB_HOST_tamar_template).
-
 if [ -f "$ENV_FILE_LOCAL" ]; then
     log "Loading local .env file ($ENV_FILE_LOCAL) into environment..."
     set -a
@@ -86,7 +83,7 @@ for app in $APPS; do
     APP_FOLDER="$APPS_DIR/$APP_NAME"
 
     # ------------------------------------------------------------------------------
-    # Step 5A: (Optional) Update Repository Content
+    # Step 5A: Update Repository Content
     # ------------------------------------------------------------------------------
     read -p "Do you want to update the repository content for app ($APP_NAME)? (y/n): " update_repo
     if [[ "$update_repo" =~ ^[yY] ]]; then
@@ -131,10 +128,7 @@ for app in $APPS; do
     else
         log "Skipped repository content update for $APP_NAME."
     fi
-
-    # ------------------------------------------------------------------------------
-    # Step 5B: (Optional) Update Environment Variables for This App
-    # ------------------------------------------------------------------------------
+    
     # ------------------------------------------------------------------------------
     # Step 5B: Update Environment Variables for This App
     # ------------------------------------------------------------------------------

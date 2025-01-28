@@ -1,19 +1,19 @@
 # Use a slim Python image
 FROM python:3.9-slim
 
-# Define project name
-ARG PROJECT_NAME=tamar_template
+# Define container name dynamically
+ARG PROJECT_NAME
 ENV PROJECT_NAME=$PROJECT_NAME
 
 # Add a user for security purposes
 RUN useradd -ms /bin/bash $PROJECT_NAME
 
-# Create the app directory and set permissions
-RUN mkdir -p /home/app && \
-    chown -R $PROJECT_NAME:$PROJECT_NAME /home/app
+# Create the apps directory and set permissions
+RUN mkdir -p /home/apps && \
+    chown -R $PROJECT_NAME:$PROJECT_NAME /home/apps
 
-# Copy the specific app folder into the container
-COPY ./apps/$PROJECT_NAME /home/app
+# Copy the entire apps folder into the container
+COPY ./apps /home/apps
 
 # Copy the cron file from the `def` folder into the container as a root cron job
 COPY ./def/cron /etc/cron.d/project-cron
@@ -30,11 +30,18 @@ RUN mkdir -p /var/run && chmod -R 0755 /var/run
 # Install cron
 RUN apt-get update && apt-get install -y cron
 
-# Update pip and install Python dependencies
-RUN pip install --upgrade pip && pip install -r /home/app/requirements.txt
+# Update pip (package installation will be added dynamically by the script)
+RUN pip install --upgrade pip
 
-# Set the working directory
-WORKDIR /home/app
+RUN echo "Contents of /home/apps:" && ls -l /home/apps
+
+RUN echo "Contents of /home:" && ls -l /home
+
+# Placeholder for app requirements installation
+# PLACEHOLDER: APP REQUIREMENTS INSTALLATION
+
+# Set the working directory to /home
+WORKDIR /home
 
 # Start cron in the foreground as root
 CMD ["cron", "-f"]

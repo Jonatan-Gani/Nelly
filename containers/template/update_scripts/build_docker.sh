@@ -24,7 +24,7 @@ fi
 
 # Extract values from the new config structure
 IMAGE_NAME=$(jq -r '.image_name // "default_image"' "$CONFIG_FILE")
-PROJECT_NAME=$(jq -r '.apps[0].app_name // "default_project"' "$CONFIG_FILE")
+PROJECT_NAME=$(jq -r '.container_name // "default_container"' "$CONFIG_FILE")
 PACKAGES=$(jq -r '.packages[]' "$CONFIG_FILE")
 
 # Check if the image name already exists
@@ -48,10 +48,24 @@ cp "$SCRIPT_DIR/../def/Dockerfile" "$TEMP_DOCKERFILE"
 log "Setting up PROJECT_NAME in Dockerfile..."
 sed -i "/^FROM/a ARG PROJECT_NAME=$PROJECT_NAME\nENV PROJECT_NAME=\$PROJECT_NAME" "$TEMP_DOCKERFILE"
 
-# Update COPY commands to reflect correct paths
-log "Updating COPY commands in Dockerfile..."
-sed -i "s|COPY cron /etc/cron.d/project-cron|COPY ./def/cron /etc/cron.d/project-cron|g" "$TEMP_DOCKERFILE"
-sed -i "s|COPY app /home/app|COPY ./app /home/app|g" "$TEMP_DOCKERFILE"
+# # Update COPY commands to reflect correct paths
+# log "Updating COPY commands in Dockerfile..."
+# sed -i "s|COPY ./apps /home/app|COPY ./apps /home/apps|g" "$TEMP_DOCKERFILE"
+
+# Insert placeholder for per-app requirements installation
+log "Adding placeholder for per-app requirements installation to Dockerfile..."
+sed -i "/^WORKDIR/a # PLACEHOLDER: APP REQUIREMENTS INSTALLATION" "$TEMP_DOCKERFILE"
+
+# Process each app directory and add a RUN command for its requirements
+log "Adding per-app requirements installation commands to Dockerfile..."
+APPS_DIR="$SCRIPT_DIR/../apps"
+for app in "$APPS_DIR"/*; do
+    if [ -d "$app" ] && [ -f "$app/requirements.txt" ]; then
+        APP_NAME=$(basename "$app")
+        log "Adding requirements installation for app: $APP_NAME"
+        sed -i "/# PLACEHOLDER: APP REQUIREMENTS INSTALLATION/a RUN pip install -r /home/apps/$APP_NAME/requirements.txt" "$TEMP_DOCKERFILE"
+    fi
+done
 
 # Add package installation to Dockerfile
 if [ -n "$PACKAGES" ]; then
