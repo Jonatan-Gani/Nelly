@@ -96,3 +96,199 @@
 2025-01-28 13:15:46 - Skipped repository content update for tamar_template.
 2025-01-28 13:15:47 - Skipped environment variable update for tamar_template.
 2025-01-28 13:15:47 - All application updates completed.
+2025-01-28 13:35:54 - Loading local .env file (/home/Jonatan/Nelly/containers/template/update_scripts/../def/.env) into environment...
+2025-01-28 13:35:54 - Processing applications defined in the configuration...
+2025-01-28 13:36:01 - Skipped repository content update for tamar_template.
+2025-01-28 13:36:09 - Skipped environment variable update for tamar_template.
+2025-01-28 13:36:11 - Generating requirements.txt for tamar_template...
+2025-01-28 13:36:11 - Backing up existing requirements.txt for tamar_template...
+2025-01-28 13:36:11 - Creating a new virtual environment for tamar_template...
+2025-01-28 13:36:15 - Freezing dependencies into requirements.txt for tamar_template...
+2025-01-28 13:36:16 - Ensuring requirements.txt is saved with UTF-8 encoding...
+2025-01-28 13:36:16 - Requirements file for tamar_template created successfully at /home/Jonatan/Nelly/containers/template/update_scripts/../apps/tamar_template/requirements.txt.
+2025-01-28 13:36:16 - All application updates completed.
+2025-01-28 13:42:07 - Loading local .env file (/home/Jonatan/Nelly/containers/template/update_scripts/../def/.env) into environment...
+2025-01-28 13:42:07 - Processing applications defined in the configuration...
+2025-01-28 13:42:09 - Skipped repository content update for tamar_template.
+2025-01-28 13:42:12 - Skipped environment variable update for tamar_template.
+2025-01-28 13:42:13 - Generating requirements.txt for tamar_template...
+2025-01-28 13:42:13 - pipreqs is required but not installed. Installing pipreqs...
+2025-01-28 13:42:14 - Error: Failed to install pipreqs.
+2025-01-28 13:42:14 - All application updates completed.
+2025-01-28 13:44:42 - Loading local .env file (/home/Jonatan/Nelly/containers/template/update_scripts/../def/.env) into environment...
+2025-01-28 13:44:42 - Processing applications defined in the configuration...
+2025-01-28 13:44:43 - Skipped repository content update for tamar_template.
+2025-01-28 13:44:44 - Skipped environment variable update for tamar_template.
+2025-01-28 13:44:46 - Generating requirements.txt for tamar_template...
+2025-01-28 13:44:46 - pipreqs is required but not installed. Installing pipreqs using apt...
+2025-01-28 13:44:49 - Error: Failed to install pipreqs using apt.
+2025-01-28 13:44:49 - All application updates completed.
+2025-01-28 13:50:22 - Loading local .env file (/home/Jonatan/Nelly/containers/template/update_scripts/../def/.env) into environment...
+2025-01-28 13:50:22 - Processing applications defined in the configuration...
+2025-01-28 13:50:24 - Skipped repository content update for tamar_template.
+2025-01-28 13:50:30 - Updating environment variables (.env) for tamar_template...
+2025-01-28 13:50:30 - Removed old .env file for tamar_template.
+2025-01-28 13:50:30 - .env file for tamar_template created/updated successfully.
+2025-01-28 13:50:42 - Generating requirements.txt for tamar_template...
+2025-01-28 13:50:42 - Sourcing .env file for tamar_template...
+2025-01-28 13:50:42 - Creating a virtual environment for pipreqs...
+2025-01-28 13:50:47 - Installing pipreqs in the virtual environment...
+2025-01-28 13:51:03 - Running pipreqs for tamar_template...
+2025-01-28 13:51:03 - Requirements file for tamar_template created successfully at /home/Jonatan/Nelly/containers/template/update_scripts/../apps/tamar_template/requirements.txt.
+2025-01-28 13:51:03 - All application updates completed.
+2025-01-28 13:57:22 - Loading local .env file (/home/Jonatan/Nelly/containers/template/update_scripts/../def/.env) into environment...
+2025-01-28 13:57:22 - Processing applications defined in the configuration...
+2025-01-28 13:57:23 - Skipped repository content update for tamar_template.
+2025-01-28 13:57:25 - Skipped environment variable update for tamar_template.
+2025-01-28 13:57:27 - Generating requirements.txt for tamar_template...
+2025-01-28 13:57:27 - Backing up existing requirements.txt for tamar_template...
+2025-01-28 13:57:27 - Analyzing Python files in /home/Jonatan/Nelly/containers/template/update_scripts/../apps/tamar_template for imports...
+2025-01-28 13:57:27 - Package abc not found in pip. Adding without version.
+2025-01-28 13:57:28 - Package argparse not found in pip. Adding without version.
+2025-01-28 13:57:28 - Package array not found in pip. Adding without version.
+2025-01-28 13:57:29 - Package ast not found in pip. Adding without version.
+2025-01-28 13:57:30 - Package asyncio not found in pip. Adding without version.
+2025-01-28 13:57:30 - Package atexit not found in pip. Adding without version.
+2025-01-28 13:57:31 - Package base64 not found in pip. Adding without version.
+2025-01-28 13:57:31 - Package binascii not found in pip. Adding without version.
+2025-01-28 13:57:32 - Package bisect not found in pip. Adding without version.
+2025-01-28 13:57:32 - Package builtins not found in pip. Adding without version.
+2025-01-28 13:57:33 - Package calendar not found in pip. Adding without version.
+2025-01-28 13:57:33 - Package codecs not found in pip. Adding without version.
+2025-01-28 13:57:34 - Package collections not found in pip. Adding without version.
+2025-01-28 13:57:34 - Package colorsys not found in pip. Adding without version.
+2025-01-28 13:57:35 - Package compileall not found in pip. Adding without version.
+2025-01-28 13:57:35 - Package concurrent not found in pip. Adding without version.
+2025-01-28 13:57:36 - Package configparser not found in pip. Adding without version.
+2025-01-28 13:57:37 - Package contextlib not found in pip. Adding without version.
+2025-01-28 13:57:37 - Package copy not found in pip. Adding without version.
+2025-01-28 13:57:38 - Adding package: cryptography==38.0.4
+2025-01-28 13:57:39 - Package csv not found in pip. Adding without version.
+2025-01-28 13:57:39 - Package ctypes not found in pip. Adding without version.
+2025-01-28 13:57:40 - Package dataclasses not found in pip. Adding without version.
+2025-01-28 13:57:40 - Package datetime not found in pip. Adding without version.
+2025-01-28 13:57:41 - Package dis not found in pip. Adding without version.
+2025-01-28 13:57:41 - Package distutils not found in pip. Adding without version.
+2025-01-28 13:57:42 - Package _distutils_hack not found in pip. Adding without version.
+2025-01-28 13:57:43 - Adding package: docutils==0.19
+2025-01-28 13:57:43 - Package email not found in pip. Adding without version.
+2025-01-28 13:57:44 - Package encodings not found in pip. Adding without version.
+2025-01-28 13:57:44 - Package enum not found in pip. Adding without version.
+2025-01-28 13:57:45 - Package errno not found in pip. Adding without version.
+2025-01-28 13:57:45 - Package fnmatch not found in pip. Adding without version.
+2025-01-28 13:57:46 - Package fractions not found in pip. Adding without version.
+2025-01-28 13:57:46 - Package functools not found in pip. Adding without version.
+2025-01-28 13:57:47 - Package __future__ not found in pip. Adding without version.
+2025-01-28 13:57:48 - Package getopt not found in pip. Adding without version.
+2025-01-28 13:57:48 - Package getpass not found in pip. Adding without version.
+2025-01-28 13:57:49 - Package glob not found in pip. Adding without version.
+2025-01-28 13:57:49 - Package glog not found in pip. Adding without version.
+2025-01-28 13:57:50 - Package gzip not found in pip. Adding without version.
+2025-01-28 13:57:50 - Package hashlib not found in pip. Adding without version.
+2025-01-28 13:57:51 - Package heapq not found in pip. Adding without version.
+2025-01-28 13:57:51 - Package hmac not found in pip. Adding without version.
+2025-01-28 13:57:52 - Package html not found in pip. Adding without version.
+2025-01-28 13:57:52 - Package http not found in pip. Adding without version.
+2025-01-28 13:57:53 - Package importlib not found in pip. Adding without version.
+2025-01-28 13:57:53 - Package inspect not found in pip. Adding without version.
+2025-01-28 13:57:54 - Package io not found in pip. Adding without version.
+2025-01-28 13:57:55 - Package ipaddress not found in pip. Adding without version.
+2025-01-28 13:57:55 - Package itertools not found in pip. Adding without version.
+2025-01-28 13:57:56 - Adding package: Jinja2==3.1.2
+2025-01-28 13:57:57 - Package json not found in pip. Adding without version.
+2025-01-28 13:57:57 - Package keyword not found in pip. Adding without version.
+2025-01-28 13:57:58 - Package locale not found in pip. Adding without version.
+2025-01-28 13:57:58 - Package logging not found in pip. Adding without version.
+2025-01-28 13:57:59 - Package marshal not found in pip. Adding without version.
+2025-01-28 13:57:59 - Package math not found in pip. Adding without version.
+2025-01-28 13:58:00 - Package mimetypes not found in pip. Adding without version.
+2025-01-28 13:58:00 - Package mmap not found in pip. Adding without version.
+2025-01-28 13:58:01 - Package ntlm not found in pip. Adding without version.
+2025-01-28 13:58:01 - Package ntpath not found in pip. Adding without version.
+2025-01-28 13:58:02 - Package numbers not found in pip. Adding without version.
+2025-01-28 13:58:02 - Package OpenSSL not found in pip. Adding without version.
+2025-01-28 13:58:03 - Package operator not found in pip. Adding without version.
+2025-01-28 13:58:04 - Package optparse not found in pip. Adding without version.
+2025-01-28 13:58:04 - Package os not found in pip. Adding without version.
+2025-01-28 13:58:05 - Adding package: pandas==1.5.3
+2025-01-28 13:58:06 - Package pathlib not found in pip. Adding without version.
+2025-01-28 13:58:06 - Package pickle not found in pip. Adding without version.
+2025-01-28 13:58:07 - Adding package: pip==23.0.1
+2025-01-28 13:58:08 - Package pkg_resources not found in pip. Adding without version.
+2025-01-28 13:58:08 - Package pkgutil not found in pip. Adding without version.
+2025-01-28 13:58:09 - Package platform not found in pip. Adding without version.
+2025-01-28 13:58:10 - Adding package: platformdirs==2.6.0
+2025-01-28 13:58:10 - Package plistlib not found in pip. Adding without version.
+2025-01-28 13:58:11 - Package posixpath not found in pip. Adding without version.
+2025-01-28 13:58:11 - Package pprint not found in pip. Adding without version.
+2025-01-28 13:58:12 - Package py_compile not found in pip. Adding without version.
+2025-01-28 13:58:13 - Adding package: pyparsing==3.0.9
+2025-01-28 13:58:13 - Package queue not found in pip. Adding without version.
+2025-01-28 13:58:14 - Package railroad not found in pip. Adding without version.
+2025-01-28 13:58:14 - Package random not found in pip. Adding without version.
+2025-01-28 13:58:15 - Package re not found in pip. Adding without version.
+2025-01-28 13:58:15 - Package runpy not found in pip. Adding without version.
+2025-01-28 13:58:16 - Package select not found in pip. Adding without version.
+2025-01-28 13:58:17 - Adding package: setuptools==66.1.1
+2025-01-28 13:58:17 - Package shlex not found in pip. Adding without version.
+2025-01-28 13:58:18 - Package shutil not found in pip. Adding without version.
+2025-01-28 13:58:19 - Package site not found in pip. Adding without version.
+2025-01-28 13:58:19 - Package socket not found in pip. Adding without version.
+2025-01-28 13:58:20 - Package sphinx not found in pip. Adding without version.
+2025-01-28 13:58:20 - Package ssl not found in pip. Adding without version.
+2025-01-28 13:58:21 - Package stat not found in pip. Adding without version.
+2025-01-28 13:58:21 - Package string not found in pip. Adding without version.
+2025-01-28 13:58:22 - Package struct not found in pip. Adding without version.
+2025-01-28 13:58:22 - Package subprocess not found in pip. Adding without version.
+2025-01-28 13:58:23 - Package sys not found in pip. Adding without version.
+2025-01-28 13:58:23 - Package sysconfig not found in pip. Adding without version.
+2025-01-28 13:58:24 - Package tarfile not found in pip. Adding without version.
+2025-01-28 13:58:24 - Package tempfile not found in pip. Adding without version.
+2025-01-28 13:58:25 - Package textwrap not found in pip. Adding without version.
+2025-01-28 13:58:26 - Package the not found in pip. Adding without version.
+2025-01-28 13:58:26 - Package threading not found in pip. Adding without version.
+2025-01-28 13:58:27 - Package time not found in pip. Adding without version.
+2025-01-28 13:58:27 - Package tokenize not found in pip. Adding without version.
+2025-01-28 13:58:28 - Package tornado not found in pip. Adding without version.
+2025-01-28 13:58:28 - Package traceback not found in pip. Adding without version.
+2025-01-28 13:58:29 - Package types not found in pip. Adding without version.
+2025-01-28 13:58:29 - Package typing not found in pip. Adding without version.
+2025-01-28 13:58:30 - Package unicodedata not found in pip. Adding without version.
+2025-01-28 13:58:30 - Package unittest not found in pip. Adding without version.
+2025-01-28 13:58:31 - Package urllib not found in pip. Adding without version.
+2025-01-28 13:58:31 - Package uuid not found in pip. Adding without version.
+2025-01-28 13:58:32 - Package warnings not found in pip. Adding without version.
+2025-01-28 13:58:32 - Package weakref not found in pip. Adding without version.
+2025-01-28 13:58:33 - Package winreg not found in pip. Adding without version.
+2025-01-28 13:58:33 - Package within not found in pip. Adding without version.
+2025-01-28 13:58:34 - Package xmlrpc not found in pip. Adding without version.
+2025-01-28 13:58:35 - Package zipfile not found in pip. Adding without version.
+2025-01-28 13:58:35 - Package zipimport not found in pip. Adding without version.
+2025-01-28 13:58:36 - Package zlib not found in pip. Adding without version.
+2025-01-28 13:58:36 - Adding git source dependencies...
+2025-01-28 13:58:36 - Adding git source: git+https://github.com/Jonatan-Gani/db_utils.git@8a0f401c633f875299de4d28b646e1e582ac64b7
+2025-01-28 13:58:36 - Adding git source: git+https://github.com/Jonatan-Gani/glog.git@48d911e5110bab96f91eb37f02194957b3b77f1f
+2025-01-28 13:58:36 - Requirements file for tamar_template created successfully at /home/Jonatan/Nelly/containers/template/update_scripts/../apps/tamar_template/requirements.txt.
+2025-01-28 13:58:36 - All application updates completed.
+2025-02-02 11:04:28 - Loading local .env file (/home/Jonatan/Nelly/containers/template/update_scripts/../def/.env) into environment...
+2025-02-02 11:04:28 - Processing applications defined in the configuration...
+2025-02-02 11:04:30 - Fetching repository content for app (tamar_template) from git@github.com:Jonatan-Gani/tamar_template.git (branch: master)...
+2025-02-02 11:04:30 - Cloning repository for tamar_template...
+2025-02-02 11:04:32 - Copying repository content to app folder for tamar_template...
+2025-02-02 11:04:32 - Cleaning up temporary directory for tamar_template...
+2025-02-02 11:04:32 - Repository content for tamar_template updated successfully.
+2025-02-02 11:04:39 - Updating environment variables (.env) for tamar_template...
+2025-02-02 11:04:40 - .env file for tamar_template created/updated successfully.
+2025-02-02 11:04:40 - All application updates completed.
+2025-02-02 18:13:28 - Loading local .env file (/home/Jonatan/Nelly/containers/template/update_scripts/../def/.env) into environment...
+2025-02-02 18:13:28 - Processing applications defined in the configuration...
+2025-02-02 18:14:36 - Fetching repository content for app (tamar_template) from git@github.com:Jonatan-Gani/tamar_template.git (branch: master)...
+2025-02-02 18:14:36 - Cleaning up existing folder for tamar_template...
+2025-02-02 18:14:36 - Cloning repository for tamar_template...
+2025-02-02 18:14:37 - Copying repository content to app folder for tamar_template...
+2025-02-02 18:14:37 - Cleaning up temporary directory for tamar_template...
+2025-02-02 18:14:37 - Repository content for tamar_template updated successfully.
+2025-02-02 18:14:48 - Updating environment variables (.env) for tamar_template...
+2025-02-02 18:14:48 - Removed old .env file for tamar_template.
+2025-02-02 18:14:48 - .env file for tamar_template created/updated successfully.
+2025-02-02 18:14:48 - All application updates completed.

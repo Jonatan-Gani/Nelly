@@ -48,10 +48,6 @@ cp "$SCRIPT_DIR/../def/Dockerfile" "$TEMP_DOCKERFILE"
 log "Setting up PROJECT_NAME in Dockerfile..."
 sed -i "/^FROM/a ARG PROJECT_NAME=$PROJECT_NAME\nENV PROJECT_NAME=\$PROJECT_NAME" "$TEMP_DOCKERFILE"
 
-# # Update COPY commands to reflect correct paths
-# log "Updating COPY commands in Dockerfile..."
-# sed -i "s|COPY ./apps /home/app|COPY ./apps /home/apps|g" "$TEMP_DOCKERFILE"
-
 # Insert placeholder for per-app requirements installation
 log "Adding placeholder for per-app requirements installation to Dockerfile..."
 sed -i "/^WORKDIR/a # PLACEHOLDER: APP REQUIREMENTS INSTALLATION" "$TEMP_DOCKERFILE"

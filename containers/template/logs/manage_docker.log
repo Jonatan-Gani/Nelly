@@ -26,3 +26,10 @@
 2025-01-28 13:19:07 - Network (Nelly_Network) already exists.
 2025-01-28 13:19:07 - Running Docker container (tamar_template)...
 2025-01-28 13:19:08 - Docker container (tamar_template) is now running.
+2025-02-02 11:07:38 - A container with the name (tamar_template) already exists.
+2025-02-02 11:07:53 - Stopping and removing existing container (tamar_template)...
+2025-02-02 11:08:04 - Network (Nelly_Network) already exists.
+2025-02-02 11:08:04 - Running Docker container (tamar_template)...
+2025-02-02 11:08:04 - Docker container (tamar_template) is now running.
+2025-02-02 18:18:21 - A container with the name (tamar_template) already exists.
+2025-02-02 19:24:38 - Skipping container deployment as the existing container was not removed.

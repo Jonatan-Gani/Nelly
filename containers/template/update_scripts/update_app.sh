@@ -128,7 +128,7 @@ for app in $APPS; do
     else
         log "Skipped repository content update for $APP_NAME."
     fi
-    
+
     # ------------------------------------------------------------------------------
     # Step 5B: Update Environment Variables for This App
     # ------------------------------------------------------------------------------
@@ -183,7 +183,6 @@ for app in $APPS; do
     else
         log "Skipped environment variable update for $APP_NAME."
     fi
-
 
 done
 
