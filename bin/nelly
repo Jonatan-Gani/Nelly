@@ -1,0 +1,87 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+NELLY_ROOT="$(cd "$(dirname "$(realpath "$0")")/.." && pwd)"
+export NELLY_ROOT
+LIB="$NELLY_ROOT/lib"
+
+# shellcheck source=../lib/common.sh
+source "$LIB/common.sh"
+
+usage() {
+    cat <<EOF
+nelly — deploy scheduled Python jobs in Docker
+
+USAGE
+    nelly <command> <deployment> [options]
+
+COMMANDS
+    deploy <name>           Full pipeline: fetch apps, build image, (re)start container
+    fetch  <name>           Clone/refresh app repos at pinned commits
+    build  <name>           Build the Docker image
+    run    <name>           (Re)start the container
+    logs   <name> [app]     Tail logs (cron output for the deployment, or one app)
+    status <name>           Show container + last app commit info
+    init   <name>           Scaffold a new deployment from containers/template
+    prune  <name>           Remove old log files (>7 days)
+
+OPTIONS
+    -i, --interactive       Prompt before destructive actions (default: no)
+    -h, --help              Show this help
+
+Each <name> refers to a directory under containers/<name>.
+EOF
+}
+
+cmd="${1:-}"
+case "$cmd" in
+    -h|--help|help|"")
+        usage; exit 0 ;;
+esac
+shift
+
+name="${1:-}"
+if [[ -z "$name" ]]; then
+    err "missing deployment name"
+    usage
+    exit 2
+fi
+shift
+
+INTERACTIVE=0
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -i|--interactive) INTERACTIVE=1 ;;
+        -h|--help) usage; exit 0 ;;
+        *) break ;;
+    esac
+    shift
+done
+export INTERACTIVE
+
+DEPLOY_DIR="$NELLY_ROOT/containers/$name"
+
+case "$cmd" in
+    init)
+        if [[ -e "$DEPLOY_DIR" ]]; then
+            die "deployment already exists: $DEPLOY_DIR"
+        fi
+        cp -r "$NELLY_ROOT/containers/template" "$DEPLOY_DIR"
+        info "scaffolded $DEPLOY_DIR — edit def/config.json and run: nelly deploy $name"
+        ;;
+    deploy)
+        [[ -d "$DEPLOY_DIR" ]] || die "no such deployment: $name (try: nelly init $name)"
+        "$LIB/fetch.sh"  "$DEPLOY_DIR"
+        "$LIB/build.sh"  "$DEPLOY_DIR"
+        "$LIB/run.sh"    "$DEPLOY_DIR"
+        "$LIB/prune.sh"  "$DEPLOY_DIR" || true
+        info "deploy complete: $name"
+        ;;
+    fetch)  "$LIB/fetch.sh"  "$DEPLOY_DIR" ;;
+    build)  "$LIB/build.sh"  "$DEPLOY_DIR" ;;
+    run)    "$LIB/run.sh"    "$DEPLOY_DIR" ;;
+    prune)  "$LIB/prune.sh"  "$DEPLOY_DIR" ;;
+    logs)   "$LIB/logs.sh"   "$DEPLOY_DIR" "${1:-}" ;;
+    status) "$LIB/status.sh" "$DEPLOY_DIR" ;;
+    *) err "unknown command: $cmd"; usage; exit 2 ;;
+esac

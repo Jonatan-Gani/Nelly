@@ -1,23 +1,15 @@
-ls# Ignore everything in the App directory
+# Per-deployment dirs under containers/ are user data — only ship the template.
 /containers/*
-
-# Except the "template" folder
 !/containers/template/
 
-# Include everything inside the "template" folder
-!/containers/template/**
-
-# Ignore the content of the "apps" folder inside the "template"
+# Inside the template, ship the scaffolding but not its runtime contents.
 /containers/template/apps/*
-
-# Allow the "apps" folder itself (to keep it as an empty folder)
-/containers/template/apps/
-
-# Ignore the content of the "logs" folder inside the "template"
 /containers/template/logs/*
+/containers/template/.build/
+/containers/template/def/.env
+/containers/template/def/commits.lock.json
+/containers/template/def/last_image.txt
 
-# Allow the "logs" folder itself (to keep it as an empty folder)
-/containers/template/logs/
-
-# Ignore the content of the ".env" the "template"
-containers/template/def/.env
+# Keep the empty folders around so a fresh clone has the layout.
+!/containers/template/apps/.gitkeep
+!/containers/template/logs/.gitkeep
