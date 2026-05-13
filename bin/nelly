@@ -1,169 +1,264 @@
 #!/usr/bin/env bash
-# nelly — manage scheduled Python deployments in Docker.
+# nelly — schedule Python jobs in Docker, painlessly.
 #
-# A single CLI for the whole lifecycle:
-#
-#   Setup        init, validate, edit, show, get, set
-#   Apps         add-app, remove-app, set-schedule
-#   Secrets      secrets set|unset|list|edit|template
-#   Build/run    fetch, build, run, deploy, rollback, diff
-#   Lifecycle    start, stop, restart, exec, shell, run-now, inspect
-#   Observe      list (ls), ps, stats, status, logs
-#   Cleanup      prune
-#
-# See `nelly help <command>` for per-command help.
+# This file dispatches subcommands to lib/*.sh. The intent is that
+# someone new can run `nelly` and find their way without reading docs.
 
 set -euo pipefail
 
 NELLY_ROOT="$(cd "$(dirname "$(realpath "$0")")/.." && pwd)"
 export NELLY_ROOT
 LIB="$NELLY_ROOT/lib"
-
 # shellcheck source=../lib/common.sh
 source "$LIB/common.sh"
 
 NELLY_OUTPUT="${NELLY_OUTPUT:-human}"
+# INTERACTIVE controls confirmation prompts before destructive ops (off by default
+# so CLI / cron / CI use is friction-free). Setup wizards trigger on missing args,
+# not on this flag — running `nelly app add <name>` with no flags drops you into
+# the wizard regardless.
 INTERACTIVE=0
 NELLY_YES=0
 export NELLY_OUTPUT INTERACTIVE NELLY_YES
+
+_bold() { [[ -t 1 ]] && printf '\033[1m%s\033[0m' "$1" || printf '%s' "$1"; }
+_dim()  { [[ -t 1 ]] && printf '\033[2m%s\033[0m' "$1" || printf '%s' "$1"; }
 
 # ----------------------------------------------------------------------------
 # help text
 # ----------------------------------------------------------------------------
 
-usage_short() {
-    cat <<'EOF'
-nelly — deploy and manage scheduled Python jobs in Docker
+intro() {
+    cat <<EOF
 
-USAGE
-    nelly <command> [args...] [--json] [-i|--interactive] [-y|--yes]
+$(_bold "nelly") — schedule Python jobs in Docker, painlessly.
 
-COMMON COMMANDS
-    init       <name>                 Scaffold a new deployment
-    deploy     <name>                 Full pipeline: fetch → build → run → prune
-    list                              List all deployments (alias: ls)
-    status     <name>                 Detailed status for one deployment
-    logs       <name> [app]           Tail cron logs (all apps, or one)
-    edit       <name>                 Edit config.json in $EDITOR (validates)
+$(_bold "First time?")
+  $(_bold "nelly init <name>")          $(_dim "# walks you through it (5 questions)")
+  $(_bold "nelly deploy <name>")        $(_dim "# build and start the container")
 
-CONFIG
-    show       <name>                                 Print current config
-    get        <name> <jq-path>                       Read a config value
-    set        <name> <jq-path> <value>               Write a config value
-    validate   <name>                                 Lint config.json
-    add-app    <name> --name N (--git URL [--ref R]|--local PATH) \
-                     [--schedule "* * * * *" --entrypoint FILE]
-    remove-app <name> <app>                           Drop an app
-    set-schedule <name> <app> "<cron>"                Change one schedule
+$(_bold "Day-to-day")
+  $(_bold "nelly list")                 $(_dim "# what deployments do I have?")
+  $(_bold "nelly explain <name>")       $(_dim "# what does this deployment do?")
+  $(_bold "nelly status  <name>")       $(_dim "# is it running? when last?")
+  $(_bold "nelly logs    <name>")       $(_dim "# tail the cron logs")
+  $(_bold "nelly app add <name>")       $(_dim "# add another scheduled job")
+  $(_bold "nelly secrets set <name> KEY=value")
 
-SECRETS
-    secrets set      <name> KEY=value [...]
-    secrets unset    <name> KEY [...]
-    secrets list     <name>
-    secrets edit     <name>
-    secrets template <name>
+$(_bold "Prefer to edit config.json directly?") That's also fine — config is the source of truth.
+  $(_bold "nelly edit    <name>")       $(_dim "# opens \$EDITOR; validates on save")
+  $(_bold "nelly doctor  <name>")       $(_dim "# sanity-check after edits")
+  $(_bold "nelly deploy  <name>")       $(_dim "# picks up any change")
 
-BUILD / RUN
-    fetch     <name>                 Refresh sources, update lockfile
-    build     <name> [--dry-run]     Build (or just render) the image
-    run       <name>                 (Re)start the container
-    deploy    <name>                 fetch + build + run + prune
-    rollback  <name> [--to TAG]      Switch back to a previous image
-    rollback  <name> --list          Show recent builds
-    diff      <name>                 Show what would change on next deploy
+$(_bold "Full reference:")   $(_bold "nelly help")
+$(_bold "One command:")      $(_bold "nelly help <command>")
+EOF
+}
 
-LIFECYCLE
-    start     <name>
-    stop      <name>
-    restart   <name>
-    exec      <name> -- <cmd...>     Run a command inside the container
-    shell     <name>                 Drop into the container's shell
-    run-now   <name> <app>           Trigger one app run outside of cron
-    inspect   <name>                 Show resource limits, image, etc.
+usage_full() {
+    cat <<EOF
 
-OBSERVATION
-    list                             All deployments + state
-    ps                               docker ps over nelly-managed containers
-    stats                            Live cpu / memory / pids per container
-    status    <name>                 Detailed status for one deployment
-    logs      <name> [app]           Tail container logs
+$(_bold "nelly") <command> [args...] [--json] [-i|--interactive] [-y|--yes]
 
-CLEANUP
-    prune     <name>                 Delete logs older than retention_days
+$(_bold "GET STARTED")
+  init       <name>                     Interactive setup wizard
+  explain    <name>                     Plain-English summary of the deployment
+  doctor     <name>                     Check for common problems before deploying
 
-GLOBAL FLAGS
-    --json                output machine-readable JSON (where supported)
-    -i, --interactive     prompt before destructive operations
-    -y, --yes             never prompt (default)
-    -h, --help            this help, or `nelly help <command>`
+$(_bold "DEPLOY / UPDATE")
+  deploy     <name>                     fetch → build → run → prune (one shot)
+  fetch      <name>                     Refresh sources, update lockfile
+  build      <name> [--dry-run]         Build the image (--dry-run prints the rendered Dockerfile)
+  run        <name>                     (Re)start the container
+  rollback   <name> [--to TAG|--list]   Switch to a previous build
+  diff       <name>                     What would change on next fetch?
+  push       <name> <app> <src> [dst]   Hot-copy a file into a running app
 
-ENVIRONMENT
-    EDITOR                used by `edit`, `secrets edit`
-    NELLY_OUTPUT          "json" forces JSON output (same as --json)
+$(_bold "MANAGE APPS")  $(_dim "(an 'app' = one scheduled Python script)")
+  app add        <name> [flags or wizard]    Add an app
+  app list       <name>                      List apps
+  app show       <name> <app>                Show one app's config
+  app remove     <name> <app>                Remove an app
+  app schedule   <name> <app> "<cron>"       Change one schedule
+  app ref        <name> <app> <git-ref>      Change git source ref
+  app path       <name> <app> <local-path>   Change local source path
 
-Run `nelly help <command>` for details on any subcommand.
+$(_bold "MANAGE CONFIG")  $(_dim "(config.json is the source of truth)")
+  edit       <name>                     Open def/config.json in \$EDITOR (validates on save)
+  show       <name>                     Print the current config
+  get        <name> <jq-path>           Read a single field (e.g. .image_name)
+  set        <name> <jq-path> <value>   Write a single field
+  validate   <name>                     Lint the config file
+
+$(_bold "MANAGE SECRETS")  $(_dim "(def/.env, mode 0600, mounted at runtime)")
+  secrets set      <name> KEY=value [...]    Or wizard-style: secrets set <name>
+  secrets unset    <name> KEY [...]
+  secrets list     <name>                    Print keys only — never values
+  secrets edit     <name>                    Open .env in \$EDITOR
+  secrets template <name>                    Print a .env skeleton
+
+$(_bold "LIFECYCLE")
+  start      <name>                     docker start
+  stop       <name>                     docker stop
+  restart    <name>                     docker restart
+  exec       <name> -- <cmd...>         Run a command inside the container
+  shell      <name>                     Drop into the container's shell
+  run-now    <name> <app>               Trigger one execution of an app
+  inspect    <name>                     Show resource limits / image / health
+
+$(_bold "OBSERVE")
+  list                                  All deployments + state   (alias: ls)
+  ps                                    docker ps over nelly-managed containers
+  stats                                 Live cpu / memory / pids
+  status     <name>                     Detailed status for one deployment
+  logs       <name> [app]               Tail container logs
+  prune      <name>                     Delete old log files
+
+$(_bold "GLOBAL FLAGS")
+  --json                   machine-readable output where supported
+  -i, --interactive        prompt before destructive ops (replacing a running container, etc.)
+  -y, --yes                never prompt; accept defaults inside wizards
+  -h, --help               this help, or 'nelly help <command>'
+
+$(_bold "ENVIRONMENT")
+  EDITOR                   used by 'edit' / 'secrets edit'
+  NELLY_OUTPUT=json        same as --json
+  NELLY_YES=1              same as --yes
+
+For detail on any command: $(_bold "nelly help <command>")
 EOF
 }
 
 cmd_help() {
     case "${1:-}" in
-        ""|help) usage_short ;;
-        deploy)  echo "nelly deploy <name>: fetch sources, build image, (re)start container, prune logs."
-                 echo "Unattended by default. Use -i to be asked before replacing a running container." ;;
-        init)    echo "nelly init <name>: scaffold containers/<name>/ from the template."
-                 echo "Next steps: edit def/config.json, set secrets, then deploy." ;;
-        fetch)   echo "nelly fetch <name>: clone or rsync every app's source, write commit SHAs to def/commits.lock.json." ;;
-        build)   echo "nelly build <name> [--dry-run]: render the Dockerfile + crontab and build the image."
-                 echo "--dry-run prints the rendered Dockerfile without building." ;;
-        run)     echo "nelly run <name>: (re)start the container using the latest built image." ;;
-        rollback)
-                 echo "nelly rollback <name>           switch to the previous image"
-                 echo "nelly rollback <name> --to TAG  switch to a specific image"
-                 echo "nelly rollback <name> --list    show recent builds" ;;
-        diff)    echo "nelly diff <name>: show which apps would change on the next fetch (remote SHA vs lockfile)." ;;
-        add-app) echo "nelly add-app <name> --name APP (--git URL [--ref R] | --local PATH) [--schedule \"…\" --entrypoint FILE]" ;;
-        push)    echo "nelly push <name> <app> <src> [dst]: docker cp a file or directory into a running app (ephemeral until next deploy)." ;;
-        secrets) echo "Manage def/.env (file mode 0600):"
-                 echo "  nelly secrets set    <name> KEY=value [...]"
-                 echo "  nelly secrets unset  <name> KEY [...]"
-                 echo "  nelly secrets list   <name>          (keys only)"
-                 echo "  nelly secrets edit   <name>"
-                 echo "  nelly secrets template <name>" ;;
-        run-now) echo "nelly run-now <name> <app>: execute the app's entrypoint immediately inside the container." ;;
-        *) echo "no extra help for '$1'. See: nelly --help" ;;
+        ""|help) usage_full ;;
+        init)
+            cat <<EOF
+$(_bold "nelly init <name>")
+
+Scaffolds a new deployment under containers/<name>/ and walks you through:
+   1. container name           $(_dim "(default: <name>)")
+   2. image name               $(_dim "(default: <name>)")
+   3. add a first app?         $(_dim "(if yes, runs the app-add wizard)")
+   4. add secrets?             $(_dim "(if yes, asks for KEY/value pairs)")
+
+After init, run:
+   $(_bold "nelly explain <name>")    $(_dim "# show what's configured")
+   $(_bold "nelly doctor  <name>")    $(_dim "# verify it'll deploy cleanly")
+   $(_bold "nelly deploy  <name>")    $(_dim "# go")
+
+Non-interactive:  $(_bold "nelly -y init <name>")    $(_dim "# accepts defaults; no app prompts")
+EOF
+            ;;
+
+        deploy) cat <<EOF
+$(_bold "nelly deploy <name>")
+   Runs the full pipeline:
+     1. fetch every app's source (git clone or local rsync) and pin the rev
+     2. build the docker image (rendered Dockerfile + crontab from config)
+     3. (re)start the container with resource limits, healthcheck, secrets
+     4. prune logs older than log_retention_days
+EOF
+            ;;
+
+        app) cat <<EOF
+$(_bold "nelly app <sub> <name> ...")
+   app add        <name>                          interactive wizard
+   app add        <name> --name N --git URL --schedule "..." --entrypoint FILE
+   app list       <name>
+   app show       <name> <app>
+   app remove     <name> <app>
+   app schedule   <name> <app> "<cron>"
+   app ref        <name> <app> <git-ref>           (git sources only)
+   app path       <name> <app> <local-path>        (local sources only)
+
+   $(_dim "Each 'app' is one scheduled Python script inside the container.")
+   $(_dim "Apps in the same deployment share the OS image but get their own venv.")
+EOF
+            ;;
+
+        secrets) cat <<EOF
+$(_bold "nelly secrets <sub> <name> ...")
+   secrets set      <name> KEY=value [KEY=value ...]    Add/replace one or more keys
+   secrets set      <name> KEY                          Prompt for value (hidden)
+   secrets unset    <name> KEY [KEY ...]                Remove keys
+   secrets list     <name>                              Print keys only
+   secrets edit     <name>                              Open .env in \$EDITOR
+   secrets template <name>                              Skeleton from config refs
+
+   Secrets live in $(_dim "containers/<name>/def/.env") (mode 0600). They are mounted
+   into the container via --env-file at runtime, never baked into the image.
+EOF
+            ;;
+
+        edit) cat <<EOF
+$(_bold "nelly edit <name>")
+   Opens containers/<name>/def/config.json in \$EDITOR (default: nano).
+   On save, the file is validated; if invalid, the previous version is restored.
+
+   config.json IS the source of truth — every other command is convenience.
+EOF
+            ;;
+
+        rollback) cat <<EOF
+$(_bold "nelly rollback <name>")
+   nelly rollback <name>              switch to the previous image
+   nelly rollback <name> --to TAG     switch to a specific image (e.g. mybot:abc123)
+   nelly rollback <name> --list       show recent builds you can roll back to
+EOF
+            ;;
+
+        diff)
+            echo "nelly diff <name>: git ls-remote each git source, compare against the lockfile, show what would change." ;;
+        explain)
+            echo "nelly explain <name>: plain-English summary of what the deployment will do." ;;
+        doctor)
+            echo "nelly doctor <name>: pre-flight checks — config valid, sources reachable, docker running, secrets present, …" ;;
+        run-now)
+            echo "nelly run-now <name> <app>: run the app's entrypoint immediately inside the container, outside of cron." ;;
+        push)
+            echo "nelly push <name> <app> <src> [dst]: docker cp into a running app. Ephemeral until next deploy." ;;
+
+        *) echo "no extra help for '$1'. See: nelly help" ;;
     esac
 }
 
 # ----------------------------------------------------------------------------
-# argument parsing
+# argument parsing — global flags can appear anywhere
 # ----------------------------------------------------------------------------
 
-# Collect global flags from anywhere in the argv into env, leave the rest in $@.
 declare -a ARGS=()
+SAW_HELP=0
 while (( $# > 0 )); do
     case "$1" in
         --json)            NELLY_OUTPUT="json"; export NELLY_OUTPUT; shift ;;
         -i|--interactive)  INTERACTIVE=1; NELLY_YES=0; export INTERACTIVE NELLY_YES; shift ;;
         -y|--yes)          NELLY_YES=1; INTERACTIVE=0; export NELLY_YES INTERACTIVE; shift ;;
-        -h|--help|help)
-            shift; cmd_help "${1:-}"; exit 0 ;;
-        --)
-            shift; ARGS+=("$@"); break ;;
-        *) ARGS+=("$1"); shift ;;
+        -h|--help)         SAW_HELP=1; shift ;;
+        help)              shift; cmd_help "${1:-}"; exit 0 ;;
+        --)                shift; ARGS+=("$@"); break ;;
+        *)                 ARGS+=("$1"); shift ;;
     esac
 done
 set -- "${ARGS[@]:-}"
 
+if (( SAW_HELP )); then
+    cmd_help "${1:-}"
+    exit 0
+fi
+
 cmd="${1:-}"
-[[ -n "$cmd" ]] || { usage_short; exit 0; }
+if [[ -z "$cmd" ]]; then
+    intro
+    exit 0
+fi
 shift || true
 
-# Resolve a deployment name to its dir (with a friendly error).
 _deploy_dir() {
-    local name="${1:-}"
-    [[ -n "$name" ]] || die "missing <name> (try: nelly list)"
-    local d="$NELLY_ROOT/containers/$name"
-    [[ -d "$d" ]] || die "no such deployment: $name (try: nelly init $name)"
+    local n="${1:-}"
+    [[ -n "$n" ]] || die "missing <name> (try: nelly list)"
+    local d="$NELLY_ROOT/containers/$n"
+    [[ -d "$d" ]] || die "no such deployment: $n (try: nelly init $n)"
     printf '%s' "$d"
 }
 
@@ -172,48 +267,66 @@ _deploy_dir() {
 # ----------------------------------------------------------------------------
 
 case "$cmd" in
+
+    # ---- onboarding ----------------------------------------------------
     init)
         name="${1:-}"
         [[ -n "$name" ]] || die "usage: nelly init <name>"
         dest="$NELLY_ROOT/containers/$name"
-        [[ -e "$dest" ]] && die "already exists: $dest"
+        if [[ -e "$dest" ]]; then
+            die "already exists: $dest  (use: nelly edit $name)"
+        fi
+        # Validate the name like docker does — we'll reuse it for container/image defaults.
+        [[ "$name" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$ ]] \
+            || die "name '$name' contains characters that won't fly with docker; use [a-zA-Z0-9_.-] starting with a letter/digit"
         cp -r "$NELLY_ROOT/containers/template" "$dest"
-        # set sensible defaults in the new config
-        "$LIB/config.sh" set "$dest" '.container_name' "$name"
-        "$LIB/config.sh" set "$dest" '.image_name'     "$name"
-        info "scaffolded $dest"
-        cat <<EOF
-Next steps:
-  1. edit apps:       nelly edit $name
-  2. add secrets:     nelly secrets set $name KEY=value
-  3. deploy:          nelly deploy $name
-EOF
+        "$LIB/wizard.sh" init "$dest"
         ;;
+
+    explain)  "$LIB/explain.sh" "$(_deploy_dir "${1:-}")" ;;
+    doctor)   "$LIB/doctor.sh"  "$(_deploy_dir "${1:-}")" ;;
 
     # ---- observation ---------------------------------------------------
-    list|ls)        "$LIB/list.sh" ;;
-    ps)             "$LIB/stats.sh" ps ;;
-    stats)          "$LIB/stats.sh" stats ;;
-    status)         "$LIB/status.sh" "$(_deploy_dir "${1:-}")" ;;
+    list|ls)  "$LIB/list.sh" ;;
+    ps)       "$LIB/stats.sh" ps ;;
+    stats)    "$LIB/stats.sh" stats ;;
+    status)   "$LIB/status.sh" "$(_deploy_dir "${1:-}")" ;;
     logs)
         d="$(_deploy_dir "${1:-}")"; shift || true
-        "$LIB/logs.sh" "$d" "${1:-}"
+        "$LIB/logs.sh" "$d" "${1:-}" ;;
+
+    # ---- app subcommands ----------------------------------------------
+    app)
+        sub="${1:-}"; shift || true
+        [[ -n "$sub" ]] || { cmd_help app; exit 2; }
+        d="$(_deploy_dir "${1:-}")"; shift || true
+        "$LIB/app.sh" "$sub" "$d" "$@"
         ;;
+    # legacy aliases
+    add-app)
+        d="$(_deploy_dir "${1:-}")"; shift || true
+        "$LIB/app.sh" add "$d" "$@" ;;
+    remove-app)
+        d="$(_deploy_dir "${1:-}")"; shift || true
+        "$LIB/app.sh" remove "$d" "$@" ;;
+    set-schedule)
+        d="$(_deploy_dir "${1:-}")"; shift || true
+        "$LIB/app.sh" schedule "$d" "$@" ;;
 
     # ---- config --------------------------------------------------------
-    show|get|set|edit|validate|add-app|remove-app|set-schedule)
+    show|get|set|edit|validate)
         d="$(_deploy_dir "${1:-}")"; shift || true
         "$LIB/config.sh" "$cmd" "$d" "$@"
         ;;
 
     # ---- secrets -------------------------------------------------------
-    secrets)
+    secrets|secret)
         sub="${1:-}"; shift || true
         d="$(_deploy_dir "${1:-}")"; shift || true
         "$LIB/secrets.sh" "$sub" "$d" "$@"
         ;;
 
-    # ---- build / run ---------------------------------------------------
+    # ---- build / run / lifecycle --------------------------------------
     deploy)
         d="$(_deploy_dir "${1:-}")"; shift || true
         with_lock "$d" bash -c "
@@ -233,19 +346,16 @@ EOF
     prune)    d="$(_deploy_dir "${1:-}")"; shift || true; "$LIB/prune.sh" "$d" "$@" ;;
     push)     d="$(_deploy_dir "${1:-}")"; shift || true; "$LIB/push.sh"  "$d" "$@" ;;
 
-    # ---- lifecycle -----------------------------------------------------
     start|stop|restart|exec|shell|inspect)
         d="$(_deploy_dir "${1:-}")"; shift || true
-        "$LIB/manage.sh" "$cmd" "$d" "$@"
-        ;;
+        "$LIB/manage.sh" "$cmd" "$d" "$@" ;;
     run-now)
         d="$(_deploy_dir "${1:-}")"; shift || true
-        "$LIB/manage.sh" run-now "$d" "$@"
-        ;;
+        "$LIB/manage.sh" run-now "$d" "$@" ;;
 
     *)
         err "unknown command: $cmd"
-        echo "Try: nelly --help" >&2
+        echo "Try: nelly help" >&2
         exit 2
         ;;
 esac

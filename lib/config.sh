@@ -41,8 +41,7 @@ validate_config() {
         '.container_name must be a non-empty string'
     _check '(.image_name | type == "string" and length > 0)' \
         '.image_name must be a non-empty string'
-    _check '(.apps | type == "array" and length > 0)' \
-        '.apps must be a non-empty array'
+    _check '(.apps | type == "array")' '.apps must be an array'
 
     # container_name and image_name: docker-safe characters
     local cname iname
@@ -157,14 +156,20 @@ set_config() {
     local config="$deploy_dir/def/config.json"
     [[ -f "$config" ]] || die "no config at $config"
 
-    # If the value parses as JSON, treat it as JSON (numbers, booleans, arrays,
-    # objects). Otherwise treat it as a string.
+    # Snapshot, write, validate; restore on failure so a bad value never lands.
+    local backup; backup="$(mktemp)"
+    cp "$config" "$backup"
+
     if echo "$value" | jq -e . >/dev/null 2>&1; then
         jq_inplace "$config" --argjson v "$value" "$path = \$v"
     else
         jq_inplace "$config" --arg v "$value" "$path = \$v"
     fi
-    validate_config "$deploy_dir"
+    if ! validate_config "$deploy_dir" 2>&1; then
+        mv "$backup" "$config"
+        die "rejected: $path = $value (config was not modified)"
+    fi
+    rm -f "$backup"
     info "set $path = $value"
 }
 
@@ -230,8 +235,14 @@ add_app() {
          | if $sc != "" then . + {schedule:$sc} else . end
          | if $ep != "" then . + {entrypoint:$ep} else . end')"
 
+    local backup; backup="$(mktemp)"
+    cp "$config" "$backup"
     jq_inplace "$config" --argjson app "$app_json" '.apps += [$app]'
-    validate_config "$deploy_dir"
+    if ! validate_config "$deploy_dir" 2>&1; then
+        mv "$backup" "$config"
+        die "rejected: app '$name' (config was not modified)"
+    fi
+    rm -f "$backup"
     info "added app '$name'"
 }
 
