@@ -1,25 +1,39 @@
 {
-  "container_name": "nelly-example",
-  "image_name": "nelly-example",
+  "container_name": "example",
+  "image_name":     "example",
+  "restart":        "unless-stopped",
   "log_retention_days": 7,
 
   "apps": [
     {
-      "app_name": "hello",
-      "git_url": "git@github.com:Jonatan-Gani/tamar_template.git",
-      "ref": "main",
-      "schedule": "*/5 * * * *",
+      "app_name":   "hello",
+      "source":     { "type": "git", "url": "git@github.com:Jonatan-Gani/tamar_template.git", "ref": "main" },
+      "schedule":   "*/5 * * * *",
       "entrypoint": "main.py"
     }
   ],
 
+  "resources": {
+    "cpus":        "1.0",
+    "memory":      "512m",
+    "pids_limit":  256
+  },
+
+  "health": {
+    "interval": "30s",
+    "timeout":  "5s",
+    "retries":  3
+  },
+
   "network": {
     "network_name": "nelly_net",
-    "subnet": "192.168.20.0/24",
+    "subnet":  "192.168.20.0/24",
     "gateway": "192.168.20.1",
     "static_ip": "192.168.20.100",
-    "ports": ["8080:80"]
+    "ports": []
   },
+
+  "volumes": [],
 
   "packages": [
     "git",
