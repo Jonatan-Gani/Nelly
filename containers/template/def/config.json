@@ -4,14 +4,9 @@
   "restart":        "unless-stopped",
   "log_retention_days": 7,
 
-  "apps": [
-    {
-      "app_name":   "hello",
-      "source":     { "type": "git", "url": "git@github.com:Jonatan-Gani/tamar_template.git", "ref": "main" },
-      "schedule":   "*/5 * * * *",
-      "entrypoint": "main.py"
-    }
-  ],
+  "tags": [],
+
+  "apps": [],
 
   "resources": {
     "cpus":        "1.0",
@@ -29,11 +24,23 @@
     "network_name": "nelly_net",
     "subnet":  "192.168.20.0/24",
     "gateway": "192.168.20.1",
-    "static_ip": "192.168.20.100",
-    "ports": []
+    "static_ip": "",
+    "hostname": "",
+    "ports": [],
+    "extra_networks": [],
+    "aliases": [],
+    "dns": [],
+    "extra_hosts": [],
+    "labels": {}
   },
 
   "volumes": [],
+
+  "hooks": {
+    "pre_deploy":  "",
+    "post_deploy": "",
+    "on_failure":  ""
+  },
 
   "packages": [
     "git",

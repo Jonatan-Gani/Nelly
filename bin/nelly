@@ -1,22 +1,21 @@
 #!/usr/bin/env bash
 # nelly — schedule Python jobs in Docker, painlessly.
 #
-# This file dispatches subcommands to lib/*.sh. The intent is that
-# someone new can run `nelly` and find their way without reading docs.
+# Single entry point. Dispatches subcommands to lib/*.sh.
 
 set -euo pipefail
+
+NELLY_VERSION="0.4.0"
 
 NELLY_ROOT="$(cd "$(dirname "$(realpath "$0")")/.." && pwd)"
 export NELLY_ROOT
 LIB="$NELLY_ROOT/lib"
 # shellcheck source=../lib/common.sh
 source "$LIB/common.sh"
+# shellcheck source=../lib/hooks.sh
+source "$LIB/hooks.sh"
 
 NELLY_OUTPUT="${NELLY_OUTPUT:-human}"
-# INTERACTIVE controls confirmation prompts before destructive ops (off by default
-# so CLI / cron / CI use is friction-free). Setup wizards trigger on missing args,
-# not on this flag — running `nelly app add <name>` with no flags drops you into
-# the wizard regardless.
 INTERACTIVE=0
 NELLY_YES=0
 export NELLY_OUTPUT INTERACTIVE NELLY_YES
@@ -31,7 +30,7 @@ _dim()  { [[ -t 1 ]] && printf '\033[2m%s\033[0m' "$1" || printf '%s' "$1"; }
 intro() {
     cat <<EOF
 
-$(_bold "nelly") — schedule Python jobs in Docker, painlessly.
+$(_bold "nelly") v$NELLY_VERSION — schedule Python jobs in Docker, painlessly.
 
 $(_bold "First time?")
   $(_bold "nelly init <name>")          $(_dim "# walks you through it (5 questions)")
@@ -42,13 +41,22 @@ $(_bold "Day-to-day")
   $(_bold "nelly explain <name>")       $(_dim "# what does this deployment do?")
   $(_bold "nelly status  <name>")       $(_dim "# is it running? when last?")
   $(_bold "nelly logs    <name>")       $(_dim "# tail the cron logs")
-  $(_bold "nelly app add <name>")       $(_dim "# add another scheduled job")
-  $(_bold "nelly secrets set <name> KEY=value")
+  $(_bold "nelly shell   <name> --app <app>")  $(_dim "# drop into the app's venv inside the container")
+  $(_bold "nelly cron    <name>")       $(_dim "# what's scheduled, in human terms")
+
+$(_bold "Share / migrate / back up")
+  $(_bold "nelly export <name>")        $(_dim "# dump deployment to JSON (no secrets by default)")
+  $(_bold "nelly import <file>")        $(_dim "# create a deployment from a JSON export")
+  $(_bold "nelly clone  <src> <dest>")  $(_dim "# fork an existing deployment")
+  $(_bold "nelly backup <name>")        $(_dim "# tarball for disaster recovery")
+
+$(_bold "Across many deployments")
+  $(_bold "nelly all list")             $(_dim "# tag-aware listing")
+  $(_bold "nelly all deploy --tag prod") $(_dim "# act on a group")
 
 $(_bold "Prefer to edit config.json directly?") That's also fine — config is the source of truth.
   $(_bold "nelly edit    <name>")       $(_dim "# opens \$EDITOR; validates on save")
-  $(_bold "nelly doctor  <name>")       $(_dim "# sanity-check after edits")
-  $(_bold "nelly deploy  <name>")       $(_dim "# picks up any change")
+  $(_bold "nelly plan    <name>")       $(_dim "# show what deploy will do, no side effects")
 
 $(_bold "Full reference:")   $(_bold "nelly help")
 $(_bold "One command:")      $(_bold "nelly help <command>")
@@ -58,66 +66,90 @@ EOF
 usage_full() {
     cat <<EOF
 
-$(_bold "nelly") <command> [args...] [--json] [-i|--interactive] [-y|--yes]
+$(_bold "nelly") v$NELLY_VERSION <command> [args...] [--json] [-i|--interactive] [-y|--yes]
 
 $(_bold "GET STARTED")
-  init       <name>                     Interactive setup wizard
-  explain    <name>                     Plain-English summary of the deployment
-  doctor     <name>                     Check for common problems before deploying
+  init       <name> [--from FILE]       Scaffold a new deployment (wizard, or from an export file)
+  explain    <name>                     Plain-English summary
+  doctor     <name>                     Pre-flight checks before deploying
+  plan       <name>                     What would deploy do? (no side effects)
 
 $(_bold "DEPLOY / UPDATE")
-  deploy     <name>                     fetch → build → run → prune (one shot)
-  fetch      <name>                     Refresh sources, update lockfile
-  build      <name> [--dry-run]         Build the image (--dry-run prints the rendered Dockerfile)
-  run        <name>                     (Re)start the container
+  deploy     <name> [--wait-healthy N] [--auto-rollback]
+                                         fetch → build → run → verify → prune
+  fetch      <name>                     Refresh sources + lockfile
+  build      <name> [--dry-run]         Build image (or render Dockerfile)
+  run        <name> [--wait-healthy N] [--auto-rollback]
+                                         (Re)start container
   rollback   <name> [--to TAG|--list]   Switch to a previous build
   diff       <name>                     What would change on next fetch?
   push       <name> <app> <src> [dst]   Hot-copy a file into a running app
 
 $(_bold "MANAGE APPS")  $(_dim "(an 'app' = one scheduled Python script)")
   app add        <name> [flags or wizard]    Add an app
-  app list       <name>                      List apps
-  app show       <name> <app>                Show one app's config
-  app remove     <name> <app>                Remove an app
-  app schedule   <name> <app> "<cron>"       Change one schedule
-  app ref        <name> <app> <git-ref>      Change git source ref
-  app path       <name> <app> <local-path>   Change local source path
+  app list       <name>
+  app show       <name> <app>
+  app remove     <name> <app>
+  app schedule   <name> <app> "<cron>"
+  app ref        <name> <app> <git-ref>
+  app path       <name> <app> <local-path>
 
 $(_bold "MANAGE CONFIG")  $(_dim "(config.json is the source of truth)")
-  edit       <name>                     Open def/config.json in \$EDITOR (validates on save)
-  show       <name>                     Print the current config
-  get        <name> <jq-path>           Read a single field (e.g. .image_name)
-  set        <name> <jq-path> <value>   Write a single field
-  validate   <name>                     Lint the config file
+  edit       <name>                     Open def/config.json in \$EDITOR
+  show       <name>                     Print the full config
+  get        <name> <jq-path>           Read one value
+  set        <name> <jq-path> <value>   Write one value (atomic + validating)
+  validate   <name>
+  tag        <name> add|remove|list TAG...
 
 $(_bold "MANAGE SECRETS")  $(_dim "(def/.env, mode 0600, mounted at runtime)")
-  secrets set      <name> KEY=value [...]    Or wizard-style: secrets set <name>
+  secrets set      <name> KEY=value [...]
   secrets unset    <name> KEY [...]
-  secrets list     <name>                    Print keys only — never values
-  secrets edit     <name>                    Open .env in \$EDITOR
-  secrets template <name>                    Print a .env skeleton
+  secrets list     <name>                    keys only
+  secrets edit     <name>
+  secrets template <name>
 
 $(_bold "LIFECYCLE")
   start      <name>                     docker start
   stop       <name>                     docker stop
   restart    <name>                     docker restart
   exec       <name> -- <cmd...>         Run a command inside the container
-  shell      <name>                     Drop into the container's shell
-  run-now    <name> <app>               Trigger one execution of an app
-  inspect    <name>                     Show resource limits / image / health
+  shell      <name> [--app <app>]       Drop into a shell (in the app's venv if --app)
+  attach     <name>                     Attach to the container's stdout
+  run-now    <name> <app>               Trigger an app immediately, outside cron
+  top        <name>                     Processes running inside the container
+  inspect    <name>                     Resources / image / health / networks
 
 $(_bold "OBSERVE")
   list                                  All deployments + state   (alias: ls)
   ps                                    docker ps over nelly-managed containers
   stats                                 Live cpu / memory / pids
-  status     <name>                     Detailed status for one deployment
+  status     <name>                     One deployment's state + pinned commits
   logs       <name> [app]               Tail container logs
+  events     <name> [--since DUR]       Stream docker events for the container
+  cron       <name> [--next N]          What's scheduled, in human terms
   prune      <name>                     Delete old log files
+
+$(_bold "SHARE / MIGRATE / BACK UP")
+  export     <name> [--include-secrets] [--include-lockfile]
+                                         Dump deployment to JSON (stdout)
+  import     <file|-> [--as <name>] [--force]
+                                         Create a deployment from an export
+  clone      <src> <dest>               Fork an existing deployment
+  backup     <name> [--out PATH] [--include-logs]
+                                         Tarball of the deployment dir
+  restore    <tarball> [--as <name>] [--force]
+
+$(_bold "ACROSS MANY DEPLOYMENTS")
+  all <cmd>  [--tag T]... [--fail-fast]
+                                         Run <cmd> against every matching deployment
+  all list                              Tag-aware deployment list
 
 $(_bold "GLOBAL FLAGS")
   --json                   machine-readable output where supported
-  -i, --interactive        prompt before destructive ops (replacing a running container, etc.)
-  -y, --yes                never prompt; accept defaults inside wizards
+  -i, --interactive        prompt before destructive ops
+  -y, --yes                never prompt; accept wizard defaults
+  --version                print nelly version
   -h, --help               this help, or 'nelly help <command>'
 
 $(_bold "ENVIRONMENT")
@@ -132,32 +164,39 @@ EOF
 cmd_help() {
     case "${1:-}" in
         ""|help) usage_full ;;
+
         init)
             cat <<EOF
-$(_bold "nelly init <name>")
+$(_bold "nelly init <name> [--from FILE]")
 
-Scaffolds a new deployment under containers/<name>/ and walks you through:
-   1. container name           $(_dim "(default: <name>)")
-   2. image name               $(_dim "(default: <name>)")
-   3. add a first app?         $(_dim "(if yes, runs the app-add wizard)")
-   4. add secrets?             $(_dim "(if yes, asks for KEY/value pairs)")
+Scaffold a new deployment. Without --from, runs an interactive wizard.
+With --from, loads the config from an export file (skipping the wizard):
 
-After init, run:
-   $(_bold "nelly explain <name>")    $(_dim "# show what's configured")
-   $(_bold "nelly doctor  <name>")    $(_dim "# verify it'll deploy cleanly")
-   $(_bold "nelly deploy  <name>")    $(_dim "# go")
+  nelly export prod > prod.json
+  scp prod.json other-host:
+  nelly init prod --from prod.json -y
 
-Non-interactive:  $(_bold "nelly -y init <name>")    $(_dim "# accepts defaults; no app prompts")
+Add -y to skip optional wizard steps (no app, no secrets) — useful when you
+plan to follow up with \`nelly edit\` or \`nelly app add\`.
 EOF
             ;;
 
-        deploy) cat <<EOF
-$(_bold "nelly deploy <name>")
-   Runs the full pipeline:
-     1. fetch every app's source (git clone or local rsync) and pin the rev
-     2. build the docker image (rendered Dockerfile + crontab from config)
-     3. (re)start the container with resource limits, healthcheck, secrets
-     4. prune logs older than log_retention_days
+        deploy)
+            cat <<EOF
+$(_bold "nelly deploy <name> [--wait-healthy N] [--auto-rollback]")
+
+The full pipeline:
+  1. pre_deploy hook (if configured)
+  2. fetch — clone or rsync each app, pin revs
+  3. build — render Dockerfile + crontab, tag image with lockfile hash
+  4. run   — (re)start container with limits, healthcheck, secrets
+  5. (optional) wait up to N seconds for healthcheck to pass
+       --auto-rollback: on failure, switch back to the previous image tag
+  6. post_deploy hook (if healthy) — or — on_failure hook (otherwise)
+  7. prune logs older than log_retention_days
+
+\`nelly deploy\` is non-interactive and exits non-zero on any failure, so
+it's safe in cron / CI.
 EOF
             ;;
 
@@ -171,53 +210,93 @@ $(_bold "nelly app <sub> <name> ...")
    app schedule   <name> <app> "<cron>"
    app ref        <name> <app> <git-ref>           (git sources only)
    app path       <name> <app> <local-path>        (local sources only)
-
-   $(_dim "Each 'app' is one scheduled Python script inside the container.")
-   $(_dim "Apps in the same deployment share the OS image but get their own venv.")
 EOF
             ;;
 
-        secrets) cat <<EOF
-$(_bold "nelly secrets <sub> <name> ...")
-   secrets set      <name> KEY=value [KEY=value ...]    Add/replace one or more keys
-   secrets set      <name> KEY                          Prompt for value (hidden)
-   secrets unset    <name> KEY [KEY ...]                Remove keys
-   secrets list     <name>                              Print keys only
-   secrets edit     <name>                              Open .env in \$EDITOR
-   secrets template <name>                              Skeleton from config refs
+        shell) cat <<EOF
+$(_bold "nelly shell <name> [--app <app>]")
 
-   Secrets live in $(_dim "containers/<name>/def/.env") (mode 0600). They are mounted
-   into the container via --env-file at runtime, never baked into the image.
+Drop into a bash inside the container.
+
+With --app <app>:
+  - cwd is /home/apps/<app>
+  - PATH is prefixed with /opt/venvs/<app>/bin (so 'python', 'pip' point at
+    that app's virtualenv)
+  - VIRTUAL_ENV and NELLY_APP are set
 EOF
             ;;
 
-        edit) cat <<EOF
-$(_bold "nelly edit <name>")
-   Opens containers/<name>/def/config.json in \$EDITOR (default: nano).
-   On save, the file is validated; if invalid, the previous version is restored.
+        export)
+            cat <<EOF
+$(_bold "nelly export <name> [--include-secrets] [--include-lockfile]")
 
-   config.json IS the source of truth — every other command is convenience.
+Print a self-contained JSON description of the deployment to stdout. Pipe
+it to a file, version-control it, mail it, whatever.
+
+Secrets are EXCLUDED by default. Pass --include-secrets to embed a base64
+copy of def/.env (handle the result like a password). --include-lockfile
+pins the exact commits, which is useful for true bit-for-bit reproduction
+on another host.
+
+Use \`nelly import\` to materialise an export on another host.
+EOF
+            ;;
+
+        backup) cat <<EOF
+$(_bold "nelly backup <name> [--out PATH] [--include-logs]")
+$(_bold "nelly restore <tarball> [--as <name>] [--force]")
+
+backup  → tarball of the deployment directory (config + secrets + lockfile
+          + build history + Dockerfile). Excludes apps/ (re-fetched) and
+          logs/ (re-created). Pass --include-logs to keep them.
+
+restore → recreate a deployment from a tarball, optionally under a new
+          name. The deployment is ready to run \`nelly deploy\`.
+EOF
+            ;;
+
+        all) cat <<EOF
+$(_bold "nelly all <cmd> [--tag T]... [--fail-fast] [-- <cmd args>...]")
+
+Run a nelly command against every matching deployment. --tag filters can
+be repeated and are AND-ed: only deployments whose config.tags[] contains
+all given tags are included.
+
+Examples:
+  nelly all list
+  nelly all status                          # status of every deployment
+  nelly all deploy --tag prod               # deploy all prod deployments
+  nelly all restart --tag prod --tag critical
+  nelly all -- --json status                # passes --json to each invocation
+EOF
+            ;;
+
+        tag) cat <<EOF
+$(_bold "nelly tag <name> <add|remove|list> [TAG...]")
+
+Tags are arbitrary strings (e.g. "prod", "critical", "team-a"). They're
+visible in \`nelly list\`, the docker label nelly.tags, and used by
+\`nelly all --tag\`.
 EOF
             ;;
 
         rollback) cat <<EOF
 $(_bold "nelly rollback <name>")
    nelly rollback <name>              switch to the previous image
-   nelly rollback <name> --to TAG     switch to a specific image (e.g. mybot:abc123)
-   nelly rollback <name> --list       show recent builds you can roll back to
+   nelly rollback <name> --to TAG     switch to a specific image
+   nelly rollback <name> --list       show recent builds
 EOF
             ;;
 
-        diff)
-            echo "nelly diff <name>: git ls-remote each git source, compare against the lockfile, show what would change." ;;
-        explain)
-            echo "nelly explain <name>: plain-English summary of what the deployment will do." ;;
-        doctor)
-            echo "nelly doctor <name>: pre-flight checks — config valid, sources reachable, docker running, secrets present, …" ;;
-        run-now)
-            echo "nelly run-now <name> <app>: run the app's entrypoint immediately inside the container, outside of cron." ;;
-        push)
-            echo "nelly push <name> <app> <src> [dst]: docker cp into a running app. Ephemeral until next deploy." ;;
+        cron) echo "nelly cron <name> [--next N]: print the assembled crontab in human-readable form. --next N adds the next N run times per app (requires python3 on the host)." ;;
+        events) echo "nelly events <name> [--since DURATION]: stream docker events for the container. Ctrl-C to stop." ;;
+        plan)   echo "nelly plan <name>: print what 'nelly deploy' would do, with no side effects." ;;
+        diff)   echo "nelly diff <name>: git ls-remote each git source, compare against the lockfile, show what would change." ;;
+        explain) echo "nelly explain <name>: plain-English summary of what the deployment will do." ;;
+        doctor)  echo "nelly doctor <name>: pre-flight checks — config valid, sources reachable, docker running, secrets present, …" ;;
+        run-now) echo "nelly run-now <name> <app>: run the app's entrypoint immediately inside the container, outside cron." ;;
+        push)    echo "nelly push <name> <app> <src> [dst]: docker cp into a running app. Ephemeral until next deploy." ;;
+        attach)  echo "nelly attach <name>: attach to the container's stdout. Ctrl-p Ctrl-q to detach without killing." ;;
 
         *) echo "no extra help for '$1'. See: nelly help" ;;
     esac
@@ -234,6 +313,7 @@ while (( $# > 0 )); do
         --json)            NELLY_OUTPUT="json"; export NELLY_OUTPUT; shift ;;
         -i|--interactive)  INTERACTIVE=1; NELLY_YES=0; export INTERACTIVE NELLY_YES; shift ;;
         -y|--yes)          NELLY_YES=1; INTERACTIVE=0; export NELLY_YES INTERACTIVE; shift ;;
+        --version)         echo "nelly $NELLY_VERSION"; exit 0 ;;
         -h|--help)         SAW_HELP=1; shift ;;
         help)              shift; cmd_help "${1:-}"; exit 0 ;;
         --)                shift; ARGS+=("$@"); break ;;
@@ -262,6 +342,36 @@ _deploy_dir() {
     printf '%s' "$d"
 }
 
+# Wrap the full deploy pipeline including hooks + optional wait/rollback.
+_run_deploy() {
+    local d="$1"; shift
+    local wait_arg="" rollback_arg=""
+    declare -a pass_through=()
+    while (( $# > 0 )); do
+        case "$1" in
+            --wait-healthy)  wait_arg="--wait-healthy $2"; shift 2 ;;
+            --auto-rollback) rollback_arg="--auto-rollback"; shift ;;
+            *) pass_through+=("$1"); shift ;;
+        esac
+    done
+
+    with_lock "$d" bash -c "
+        set -e
+        '$LIB/hooks.sh' '$d' pre_deploy
+        '$LIB/fetch.sh' '$d'
+        '$LIB/build.sh' '$d' ${pass_through[*]:-}
+        if '$LIB/run.sh' '$d' $wait_arg $rollback_arg; then
+            '$LIB/hooks.sh' '$d' post_deploy || true
+            '$LIB/prune.sh' '$d' || true
+        else
+            rc=\$?
+            '$LIB/hooks.sh' '$d' on_failure || true
+            exit \$rc
+        fi
+    "
+    info "deploy complete: $(basename "$d")"
+}
+
 # ----------------------------------------------------------------------------
 # dispatch
 # ----------------------------------------------------------------------------
@@ -270,21 +380,32 @@ case "$cmd" in
 
     # ---- onboarding ----------------------------------------------------
     init)
-        name="${1:-}"
-        [[ -n "$name" ]] || die "usage: nelly init <name>"
+        name="${1:-}"; shift || true
+        [[ -n "$name" ]] || die "usage: nelly init <name> [--from FILE]"
         dest="$NELLY_ROOT/containers/$name"
-        if [[ -e "$dest" ]]; then
-            die "already exists: $dest  (use: nelly edit $name)"
-        fi
-        # Validate the name like docker does — we'll reuse it for container/image defaults.
+        [[ -e "$dest" ]] && die "already exists: $dest  (use: nelly edit $name)"
         [[ "$name" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$ ]] \
-            || die "name '$name' contains characters that won't fly with docker; use [a-zA-Z0-9_.-] starting with a letter/digit"
-        cp -r "$NELLY_ROOT/containers/template" "$dest"
-        "$LIB/wizard.sh" init "$dest"
+            || die "invalid name '$name'; use [a-zA-Z0-9_.-] starting with a letter/digit"
+
+        FROM=""
+        while (( $# > 0 )); do
+            case "$1" in
+                --from) FROM="$2"; shift 2 ;;
+                *) shift ;;
+            esac
+        done
+
+        if [[ -n "$FROM" ]]; then
+            "$LIB/portable.sh" init-from "$FROM" "$name"
+        else
+            cp -r "$NELLY_ROOT/containers/template" "$dest"
+            "$LIB/wizard.sh" init "$dest"
+        fi
         ;;
 
     explain)  "$LIB/explain.sh" "$(_deploy_dir "${1:-}")" ;;
     doctor)   "$LIB/doctor.sh"  "$(_deploy_dir "${1:-}")" ;;
+    plan)     "$LIB/plan.sh"    "$(_deploy_dir "${1:-}")" ;;
 
     # ---- observation ---------------------------------------------------
     list|ls)  "$LIB/list.sh" ;;
@@ -294,15 +415,19 @@ case "$cmd" in
     logs)
         d="$(_deploy_dir "${1:-}")"; shift || true
         "$LIB/logs.sh" "$d" "${1:-}" ;;
+    events)
+        d="$(_deploy_dir "${1:-}")"; shift || true
+        "$LIB/events.sh" "$d" "$@" ;;
+    cron)
+        d="$(_deploy_dir "${1:-}")"; shift || true
+        "$LIB/cron.sh" "$d" "$@" ;;
 
     # ---- app subcommands ----------------------------------------------
     app)
         sub="${1:-}"; shift || true
         [[ -n "$sub" ]] || { cmd_help app; exit 2; }
         d="$(_deploy_dir "${1:-}")"; shift || true
-        "$LIB/app.sh" "$sub" "$d" "$@"
-        ;;
-    # legacy aliases
+        "$LIB/app.sh" "$sub" "$d" "$@" ;;
     add-app)
         d="$(_deploy_dir "${1:-}")"; shift || true
         "$LIB/app.sh" add "$d" "$@" ;;
@@ -313,31 +438,34 @@ case "$cmd" in
         d="$(_deploy_dir "${1:-}")"; shift || true
         "$LIB/app.sh" schedule "$d" "$@" ;;
 
+    # ---- tags ---------------------------------------------------------
+    tag)
+        d="$(_deploy_dir "${1:-}")"; shift || true
+        sub="${1:-}"; shift || true
+        [[ -n "$sub" ]] || die "usage: nelly tag <name> <add|remove|list> [TAG...]"
+        case "$sub" in
+            add)    "$LIB/config.sh" tags-add    "$d" "$@" ;;
+            remove) "$LIB/config.sh" tags-remove "$d" "$@" ;;
+            list)   "$LIB/config.sh" tags-list   "$d" ;;
+            *) die "tag sub must be add|remove|list" ;;
+        esac
+        ;;
+
     # ---- config --------------------------------------------------------
     show|get|set|edit|validate)
         d="$(_deploy_dir "${1:-}")"; shift || true
-        "$LIB/config.sh" "$cmd" "$d" "$@"
-        ;;
+        "$LIB/config.sh" "$cmd" "$d" "$@" ;;
 
     # ---- secrets -------------------------------------------------------
     secrets|secret)
         sub="${1:-}"; shift || true
         d="$(_deploy_dir "${1:-}")"; shift || true
-        "$LIB/secrets.sh" "$sub" "$d" "$@"
-        ;;
+        "$LIB/secrets.sh" "$sub" "$d" "$@" ;;
 
-    # ---- build / run / lifecycle --------------------------------------
+    # ---- deploy / build / run ----------------------------------------
     deploy)
         d="$(_deploy_dir "${1:-}")"; shift || true
-        with_lock "$d" bash -c "
-            set -e
-            '$LIB/fetch.sh' '$d'
-            '$LIB/build.sh' '$d' $*
-            '$LIB/run.sh'   '$d'
-            '$LIB/prune.sh' '$d' || true
-        "
-        info "deploy complete"
-        ;;
+        _run_deploy "$d" "$@" ;;
     fetch)    d="$(_deploy_dir "${1:-}")"; shift || true; with_lock "$d" "$LIB/fetch.sh"    "$d" "$@" ;;
     build)    d="$(_deploy_dir "${1:-}")"; shift || true; with_lock "$d" "$LIB/build.sh"    "$d" "$@" ;;
     run)      d="$(_deploy_dir "${1:-}")"; shift || true; with_lock "$d" "$LIB/run.sh"      "$d" "$@" ;;
@@ -346,12 +474,34 @@ case "$cmd" in
     prune)    d="$(_deploy_dir "${1:-}")"; shift || true; "$LIB/prune.sh" "$d" "$@" ;;
     push)     d="$(_deploy_dir "${1:-}")"; shift || true; "$LIB/push.sh"  "$d" "$@" ;;
 
-    start|stop|restart|exec|shell|inspect)
+    # ---- lifecycle -----------------------------------------------------
+    start|stop|restart|exec|shell|attach|inspect|top)
         d="$(_deploy_dir "${1:-}")"; shift || true
         "$LIB/manage.sh" "$cmd" "$d" "$@" ;;
     run-now)
         d="$(_deploy_dir "${1:-}")"; shift || true
         "$LIB/manage.sh" run-now "$d" "$@" ;;
+
+    # ---- portable / backup ---------------------------------------------
+    export)
+        d="$(_deploy_dir "${1:-}")"; shift || true
+        "$LIB/portable.sh" export "$d" "$@" ;;
+    import)
+        "$LIB/portable.sh" import "$@" ;;
+    clone)
+        src="${1:-}"; dest="${2:-}"
+        [[ -n "$src" && -n "$dest" ]] || die "usage: nelly clone <src> <dest>"
+        sd="$(_deploy_dir "$src")"
+        "$LIB/portable.sh" clone "$sd" "$dest" ;;
+    backup)
+        d="$(_deploy_dir "${1:-}")"; shift || true
+        "$LIB/backup.sh" backup "$d" "$@" ;;
+    restore)
+        "$LIB/backup.sh" restore "$@" ;;
+
+    # ---- across many deployments --------------------------------------
+    all)
+        "$LIB/all.sh" "$@" ;;
 
     *)
         err "unknown command: $cmd"

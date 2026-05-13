@@ -111,6 +111,32 @@ validate_config() {
             || errors+=(".packages entry '$pkg' invalid")
     done
 
+    # Tags
+    mapfile -t TAGS < <(jq -r '.tags[]?' "$config")
+    for t in "${TAGS[@]}"; do
+        [[ "$t" =~ ^[a-zA-Z0-9_-]+$ ]] \
+            || errors+=(".tags entry '$t' invalid (use [a-zA-Z0-9_-])")
+    done
+
+    # Hooks
+    local hook
+    for hook in pre_deploy post_deploy on_failure; do
+        local hp; hp="$(jqget "$config" ".hooks.$hook")"
+        if [[ -n "$hp" ]]; then
+            # Path can be relative to deploy_dir or absolute
+            local resolved="$hp"
+            [[ "$hp" != /* ]] && resolved="$deploy_dir/$hp"
+            [[ -f "$resolved" ]] || errors+=(".hooks.$hook points at missing file: $hp")
+        fi
+    done
+
+    # Extra networks: each must be a string
+    mapfile -t XNETS < <(jq -r '.network.extra_networks[]?' "$config")
+    for n in "${XNETS[@]}"; do
+        [[ "$n" =~ ^[a-zA-Z0-9._-]+$ ]] \
+            || errors+=(".network.extra_networks entry '$n' invalid")
+    done
+
     if (( ${#errors[@]} > 0 )); then
         err "config validation failed for $config:"
         for e in "${errors[@]}"; do err "  - $e"; done
@@ -266,6 +292,34 @@ set_schedule() {
     info "set schedule for $name → $cron"
 }
 
+# ---- tags ------------------------------------------------------------------
+
+list_tags() {
+    local deploy_dir="$1"
+    jq -r '(.tags // []) | .[]' "$deploy_dir/def/config.json"
+}
+
+add_tags() {
+    local deploy_dir="$1"; shift
+    (( $# > 0 )) || die "usage: tag add <name> TAG [TAG...]"
+    for t in "$@"; do
+        [[ "$t" =~ ^[a-zA-Z0-9_-]+$ ]] || die "invalid tag: $t (use [a-zA-Z0-9_-])"
+    done
+    local config="$deploy_dir/def/config.json"
+    jq_inplace "$config" --argjson new "$(printf '%s\n' "$@" | jq -R . | jq -s .)" \
+        '.tags = ((.tags // []) + $new | unique)'
+    info "tags: $(jq -r '(.tags // []) | join(", ")' "$config")"
+}
+
+remove_tags() {
+    local deploy_dir="$1"; shift
+    (( $# > 0 )) || die "usage: tag remove <name> TAG [TAG...]"
+    local config="$deploy_dir/def/config.json"
+    jq_inplace "$config" --argjson rm "$(printf '%s\n' "$@" | jq -R . | jq -s .)" \
+        '.tags = ((.tags // []) - $rm)'
+    info "tags: $(jq -r '(.tags // []) | join(", ")' "$config")"
+}
+
 # ---- CLI dispatch (when executed directly) ---------------------------------
 
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
@@ -279,6 +333,9 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
         add-app)      add_app     "$@" ;;
         remove-app)   remove_app  "$@" ;;
         set-schedule) set_schedule "$@" ;;
-        *) die "usage: config.sh {validate|show|get|set|edit|add-app|remove-app|set-schedule} ..." ;;
+        tags-list)    list_tags   "$@" ;;
+        tags-add)     add_tags    "$@" ;;
+        tags-remove)  remove_tags "$@" ;;
+        *) die "usage: config.sh {validate|show|get|set|edit|add-app|remove-app|set-schedule|tags-list|tags-add|tags-remove} ..." ;;
     esac
 fi

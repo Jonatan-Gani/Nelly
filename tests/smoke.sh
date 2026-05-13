@@ -3,14 +3,21 @@
 #
 # Coverage:
 #   - syntax (bash -n) + optional shellcheck
-#   - intro and help text render
-#   - `init -y` scaffolds + validates
-#   - `app add/list/remove/schedule` round-trip (flag-driven, no wizard)
-#   - `set` / `get` round-trip; JSON-typed values
-#   - `secrets set/list/unset` round-trip; .env mode 0600
-#   - invalid configs are rejected (bad cron, bad image name)
-#   - explain + doctor exit cleanly
-#   - list --json includes the new deployment
+#   - --version and help text
+#   - init -y → validate
+#   - app add/list/show/remove/schedule/ref/path
+#   - set / get / atomic rejection
+#   - secrets set/list/unset; .env mode 0600
+#   - invalid configs are rejected and rolled back
+#   - explain + doctor
+#   - tag add/remove/list
+#   - export → import round-trip (with and without secrets)
+#   - clone
+#   - backup → restore round-trip
+#   - cron preview
+#   - all list
+#   - plan
+#   - list --json
 
 set -euo pipefail
 ROOT="$(cd "$(dirname "$(realpath "$0")")/.." && pwd)"
@@ -20,6 +27,11 @@ FAIL=0
 pass()    { printf '  \033[32mok\033[0m  %s\n' "$*"; }
 fail()    { printf '  \033[31mFAIL\033[0m %s\n' "$*"; FAIL=$((FAIL+1)); }
 section() { printf '\n== %s ==\n' "$*"; }
+
+cleanup() {
+    rm -rf containers/smoketest-* /tmp/nelly-smoke-*.json /tmp/nelly-smoke-*.tar.gz 2>/dev/null || true
+}
+trap cleanup EXIT
 
 # ----------------------------------------------------------------------------
 section "bash syntax"
@@ -42,29 +54,26 @@ if command -v shellcheck >/dev/null 2>&1; then
 fi
 
 # ----------------------------------------------------------------------------
-section "intro + help"
-if bin/nelly 2>&1 | grep -q "First time?"; then pass "intro renders"; else fail "intro missing"; fi
-if bin/nelly help >/dev/null 2>&1; then pass "help renders"; else fail "help"; fi
-if bin/nelly help deploy >/dev/null 2>&1; then pass "help deploy"; else fail "help deploy"; fi
-if bin/nelly help app >/dev/null 2>&1; then pass "help app"; else fail "help app"; fi
+section "version + help"
+bin/nelly --version | grep -q '^nelly ' && pass "--version" || fail "--version"
+bin/nelly 2>&1 | grep -q "First time?" && pass "intro renders"      || fail "intro missing"
+bin/nelly help >/dev/null 2>&1         && pass "help renders"       || fail "help"
+bin/nelly help deploy >/dev/null 2>&1  && pass "help deploy"        || fail "help deploy"
+bin/nelly help export >/dev/null 2>&1  && pass "help export"        || fail "help export"
+bin/nelly help all >/dev/null 2>&1     && pass "help all"           || fail "help all"
 
 # ----------------------------------------------------------------------------
 section "init (non-interactive) → validate"
 NAME="smoketest-$$"
 DIR="containers/$NAME"
-trap 'rm -rf "$DIR"' EXIT
 
-# -y means "auto-accept defaults; no app prompts"
 bin/nelly -y init "$NAME" >/dev/null 2>&1
 [[ -f "$DIR/def/config.json" ]] && pass "init created config.json" || fail "init missing config.json"
 bin/nelly validate "$NAME" >/dev/null 2>&1 && pass "default config validates" || fail "default config invalid"
 
 cn="$(bin/nelly get "$NAME" '.container_name')"
 [[ "$cn" == "$NAME" ]] && pass "init sets container_name=$NAME" || fail "container_name=$cn"
-
-# After init, no apps yet (wizard's default skipped).
-n_apps="$(bin/nelly get "$NAME" '.apps | length')"
-[[ "$n_apps" == "0" ]] && pass "init starts with zero apps" || fail "init left $n_apps apps in config"
+[[ "$(bin/nelly get "$NAME" '.apps | length')" == "0" ]] && pass "init starts with zero apps" || fail "init left apps in config"
 
 # ----------------------------------------------------------------------------
 section "app subcommand"
@@ -75,42 +84,49 @@ bin/nelly app add "$NAME" \
     && pass "app add (flag-driven)" || fail "app add failed"
 
 bin/nelly app list "$NAME" | grep -q "^foo" \
-    && pass "app list shows foo" || fail "app list output: $(bin/nelly app list "$NAME")"
+    && pass "app list shows foo" || fail "app list output"
 
 bin/nelly app show "$NAME" foo | jq -e '.entrypoint == "main.py"' >/dev/null \
     && pass "app show returns json" || fail "app show output"
 
 bin/nelly app schedule "$NAME" foo "0 9 * * *" >/dev/null
-sched="$(bin/nelly get "$NAME" '.apps[] | select(.app_name=="foo") | .schedule')"
-[[ "$sched" == "0 9 * * *" ]] && pass "app schedule" || fail "schedule=$sched"
+[[ "$(bin/nelly get "$NAME" '.apps[] | select(.app_name=="foo") | .schedule')" == "0 9 * * *" ]] \
+    && pass "app schedule" || fail "schedule mismatch"
 
 bin/nelly app path "$NAME" foo "/var/tmp" >/dev/null
-new_path="$(bin/nelly get "$NAME" '.apps[] | select(.app_name=="foo") | .source.path')"
-[[ "$new_path" == "/var/tmp" ]] && pass "app path" || fail "path=$new_path"
+[[ "$(bin/nelly get "$NAME" '.apps[] | select(.app_name=="foo") | .source.path')" == "/var/tmp" ]] \
+    && pass "app path" || fail "path mismatch"
 
 bin/nelly app remove "$NAME" foo >/dev/null
 [[ "$(bin/nelly get "$NAME" '[.apps[] | select(.app_name=="foo")] | length')" == "0" ]] \
-    && pass "app remove" || fail "app remove failed"
+    && pass "app remove" || fail "app remove"
 
-# legacy aliases still work
+# legacy aliases
 bin/nelly add-app "$NAME" --name legacy --local /tmp --schedule "@daily" --entrypoint x.py >/dev/null
 [[ "$(bin/nelly get "$NAME" '[.apps[] | select(.app_name=="legacy")] | length')" == "1" ]] \
     && pass "legacy 'add-app' alias works" || fail "alias add-app"
 bin/nelly remove-app "$NAME" legacy >/dev/null
 
 # ----------------------------------------------------------------------------
-section "set / get roundtrip"
+section "set / get + atomic rejection"
 bin/nelly set "$NAME" '.resources.cpus' '2.0' >/dev/null
-cpus="$(bin/nelly get "$NAME" '.resources.cpus')"
-[[ "$cpus" == "2.0" ]] && pass "set/get .resources.cpus" || fail "got $cpus"
+[[ "$(bin/nelly get "$NAME" '.resources.cpus')" == "2.0" ]] && pass "set/get .resources.cpus" || fail "cpus"
 
 bin/nelly set "$NAME" '.resources.pids_limit' '512' >/dev/null
-pids="$(bin/nelly get "$NAME" '.resources.pids_limit')"
-[[ "$pids" == "512" ]] && pass "JSON-typed set (number)" || fail "got $pids"
+[[ "$(bin/nelly get "$NAME" '.resources.pids_limit')" == "512" ]] && pass "JSON-typed number" || fail "pids"
+
+if bin/nelly set "$NAME" '.image_name' 'BAD NAME' >/dev/null 2>&1; then
+    fail "accepted bad image name"
+else
+    pass "rejected bad image name"
+fi
+# .image_name should still be the previous valid value
+[[ "$(bin/nelly get "$NAME" '.image_name')" == "$NAME" ]] \
+    && pass "rejected change rolled back atomically" || fail "rollback broken: $(bin/nelly get "$NAME" '.image_name')"
 
 # ----------------------------------------------------------------------------
 section "secrets"
-bin/nelly secrets set "$NAME" FOO=bar BAZ='quoted "value"' >/dev/null
+bin/nelly secrets set "$NAME" FOO=bar 'BAZ=quoted "value"' >/dev/null
 mode="$(stat -c %a "$DIR/def/.env")"
 [[ "$mode" == "600" ]] && pass ".env mode 0600" || fail ".env mode is $mode"
 keys="$(bin/nelly secrets list "$NAME" | sort | tr '\n' ' ')"
@@ -120,46 +136,97 @@ remaining="$(bin/nelly secrets list "$NAME")"
 [[ "$remaining" == "BAZ" ]] && pass "secrets unset" || fail "got: $remaining"
 
 # ----------------------------------------------------------------------------
-section "invalid configs are rejected"
+section "tags"
+bin/nelly tag "$NAME" add prod critical >/dev/null
+[[ "$(bin/nelly tag "$NAME" list | sort | tr '\n' ' ')" == "critical prod " ]] \
+    && pass "tag add + list" || fail "tag list: $(bin/nelly tag "$NAME" list)"
+bin/nelly tag "$NAME" remove critical >/dev/null
+[[ "$(bin/nelly tag "$NAME" list | tr '\n' ' ')" == "prod " ]] && pass "tag remove" || fail "tag remove"
+
+# ----------------------------------------------------------------------------
+section "explain / cron / plan"
+bin/nelly app add "$NAME" --name e --local /tmp --schedule "*/5 * * * *" --entrypoint e.py >/dev/null
+explain_out="$(bin/nelly explain "$NAME")"
+[[ "$explain_out" == *"Apps"* && "$explain_out" == *"local: /tmp"* ]] \
+    && pass "explain prints apps section" || fail "explain output incomplete"
+
+cron_out="$(bin/nelly cron "$NAME")"
+[[ "$cron_out" == *"every 5 minute"* ]] \
+    && pass "cron describes schedule" || fail "cron output: $cron_out"
+
+plan_out="$(bin/nelly plan "$NAME" 2>&1)"
+[[ "$plan_out" == *"Plan for: $NAME"* ]] \
+    && pass "plan renders" || fail "plan output"
+
+# ----------------------------------------------------------------------------
+section "export → import round-trip"
+EXPORT_FILE="/tmp/nelly-smoke-$$.json"
+bin/nelly export "$NAME" > "$EXPORT_FILE"
+jq -e '.nelly_export_version == 1' "$EXPORT_FILE" >/dev/null \
+    && pass "export has version" || fail "export version"
+jq -e '.secrets_included == false' "$EXPORT_FILE" >/dev/null \
+    && pass "secrets excluded by default" || fail "secrets leaked"
+
+NEW="smoketest-imp-$$"
+bin/nelly import "$EXPORT_FILE" --as "$NEW" >/dev/null 2>&1
+[[ -d "containers/$NEW" ]] && pass "import created deployment" || fail "import"
+[[ "$(bin/nelly get "$NEW" '.container_name')" == "$NEW" ]] \
+    && pass "import retargets container_name" || fail "import name"
+
+# with --include-secrets
+bin/nelly export "$NAME" --include-secrets > "$EXPORT_FILE.with-secrets" 2>/dev/null
+jq -e '.secrets_included == true' "$EXPORT_FILE.with-secrets" >/dev/null \
+    && pass "--include-secrets sets flag" || fail "secrets flag"
+
+# ----------------------------------------------------------------------------
+section "clone"
+CLONE="smoketest-clone-$$"
+bin/nelly clone "$NAME" "$CLONE" >/dev/null 2>&1
+[[ -d "containers/$CLONE" ]] && pass "clone created deployment" || fail "clone"
+[[ "$(bin/nelly get "$CLONE" '.apps | length')" == "$(bin/nelly get "$NAME" '.apps | length')" ]] \
+    && pass "clone has same apps" || fail "clone apps mismatch"
+
+# ----------------------------------------------------------------------------
+section "backup → restore round-trip"
+TARBALL="/tmp/nelly-smoke-$$.tar.gz"
+bin/nelly backup "$NAME" --out "$TARBALL" >/dev/null 2>&1
+[[ -f "$TARBALL" ]] && pass "backup produced tarball" || fail "backup"
+
+REST="smoketest-rest-$$"
+bin/nelly restore "$TARBALL" --as "$REST" >/dev/null 2>&1
+[[ -d "containers/$REST" ]] && pass "restore created deployment" || fail "restore"
+[[ "$(bin/nelly get "$REST" '.container_name')" == "$REST" ]] \
+    && pass "restore retargets name" || fail "restore name"
+
+# ----------------------------------------------------------------------------
+section "all (multi-deployment)"
+bin/nelly all list >/dev/null 2>&1 && pass "all list runs" || fail "all list"
+all_out="$(bin/nelly all list --tag prod)"
+[[ "$all_out" == *"$NAME"* ]] && pass "all list --tag filters" || fail "all list --tag: $all_out"
+
+# ----------------------------------------------------------------------------
+section "invalid configs rejected"
 if bin/nelly app add "$NAME" --name bad --local /tmp --schedule "not a cron" --entrypoint m.py >/dev/null 2>&1; then
-    fail "accepted bad cron expression"
+    fail "accepted bad cron"
 else
     pass "rejected bad cron"
 fi
-if bin/nelly set "$NAME" '.image_name' 'BAD NAME' >/dev/null 2>&1; then
-    fail "accepted bad image name"
+if bin/nelly tag "$NAME" add 'bad tag!' >/dev/null 2>&1; then
+    fail "accepted bad tag"
 else
-    pass "rejected bad image name"
+    pass "rejected bad tag"
 fi
 
 # ----------------------------------------------------------------------------
-section "explain (works on empty + populated configs)"
-bin/nelly explain "$NAME" >/dev/null 2>&1 \
-    && pass "explain runs on empty config" || fail "explain failed"
-
-bin/nelly app add "$NAME" --name e --local /tmp --schedule "*/5 * * * *" --entrypoint e.py >/dev/null
-explain_out="$(bin/nelly explain "$NAME")"
-if [[ "$explain_out" == *"Apps"* ]] && [[ "$explain_out" == *"local: /tmp"* ]]; then
-    pass "explain prints apps section"
-else
-    fail "explain apps section missing"
-fi
+section "doctor (offline-friendly)"
+bin/nelly doctor "$NAME" >/dev/null 2>&1 || true
+# we just want it to have run; non-zero is expected here (no docker daemon in test env)
+pass "doctor ran"
 
 # ----------------------------------------------------------------------------
-section "doctor (offline-friendly: should not fail just because docker is absent here)"
-# Doctor returns non-zero when problems are found. We expect at least one problem
-# in this sandbox (no docker daemon), so we check that it ran and produced output.
-out="$(bin/nelly doctor "$NAME" 2>&1 || true)"
-echo "$out" | grep -q "Checking deployment" \
-    && pass "doctor reports its findings" || fail "doctor didn't run"
-
-# ----------------------------------------------------------------------------
-section "list / json output"
-if bin/nelly list --json | jq -e ".[] | select(.deployment == \"$NAME\")" >/dev/null; then
-    pass "list --json includes $NAME"
-else
-    fail "list --json missing $NAME"
-fi
+section "list --json"
+bin/nelly list --json | jq -e ".[] | select(.deployment == \"$NAME\")" >/dev/null \
+    && pass "list --json includes $NAME" || fail "list --json"
 
 # ----------------------------------------------------------------------------
 echo

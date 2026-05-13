@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# Example lifecycle hook. To use it, copy this file (without the .disabled
+# suffix), make it executable, and point config.hooks.{pre_deploy,
+# post_deploy,on_failure} at it.
+#
+# Nelly sets these environment variables before invoking the hook:
+#
+#   NELLY_DEPLOYMENT   the deployment name (basename of NELLY_DEPLOY_DIR)
+#   NELLY_DEPLOY_DIR   containers/<name>/
+#   NELLY_HOOK         "pre_deploy" | "post_deploy" | "on_failure"
+#   NELLY_IMAGE        image tag of the build that just ran (if known)
+#
+# A non-zero exit from pre_deploy ABORTS the deploy. Non-zero from
+# post_deploy / on_failure is logged but doesn't change the outcome.
+
+set -euo pipefail
+echo "[$NELLY_HOOK] $NELLY_DEPLOYMENT  image=$NELLY_IMAGE"
+
+# Example: Slack notification on post_deploy
+# if [[ "$NELLY_HOOK" == "post_deploy" && -n "${SLACK_WEBHOOK:-}" ]]; then
+#     curl -fsS -X POST "$SLACK_WEBHOOK" \
+#          -H 'Content-Type: application/json' \
+#          -d "{\"text\":\":rocket: $NELLY_DEPLOYMENT deployed as $NELLY_IMAGE\"}"
+# fi
