@@ -58,14 +58,18 @@ fetch_source() {
 _fetch_git() {
     local url="$1" ref="$2" target="$3"
     require_cmd git rsync
+    # Defense-in-depth — validate_config rejects these already, but keep the
+    # check here so this function is safe to call standalone.
+    case "$url" in -*) die "git URL must not start with '-' (got: $url)";; esac
+    case "$ref" in -*) die "git ref must not start with '-' (got: $ref)";; esac
     local tmp; tmp="$(mktemp -d)"
     trap 'rm -rf "$tmp"' RETURN
 
-    # Try a shallow clone of the ref first; fall back to a full clone + checkout
-    # so commit SHAs and tags work too.
-    if ! git clone --quiet --depth 50 --branch "$ref" "$url" "$tmp" 2>/dev/null; then
-        git clone --quiet "$url" "$tmp"
-        ( cd "$tmp" && git checkout --quiet "$ref" )
+    # The `--` separator forces git to stop interpreting subsequent args as
+    # options — closes the CVE-2017-1000117 class of argument injection.
+    if ! git clone --quiet --depth 50 --branch "$ref" -- "$url" "$tmp" 2>/dev/null; then
+        git clone --quiet -- "$url" "$tmp"
+        ( cd "$tmp" && git checkout --quiet -- "$ref" )
     fi
 
     local sha; sha="$(cd "$tmp" && git rev-parse HEAD)"

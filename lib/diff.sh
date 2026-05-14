@@ -31,7 +31,7 @@ for app in "${APPS[@]}"; do
         git)
             url="$(echo "$src" | jq -r '.url')"
             ref="$(echo "$src" | jq -r '.ref // "main"')"
-            new="$(git ls-remote "$url" "$ref" 2>/dev/null | awk 'NR==1{print $1}')"
+            new="$(git ls-remote -- "$url" "$ref" 2>/dev/null | awk 'NR==1{print $1}')"
             [[ -n "$new" ]] || new="(unresolved: $ref)"
             ;;
         local)

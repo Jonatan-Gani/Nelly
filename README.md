@@ -575,6 +575,74 @@ rather than guess.
 
 ---
 
+## Security model
+
+Nelly's trust boundary is the **deployment config file**. Anything inside
+`containers/<name>/def/config.json` is treated as code: it determines what
+gets built into a Docker image, what host paths get mounted into it, what
+runs at root inside cron, and what hooks run on the host. Treat config
+imports (`nelly import`, `nelly restore`, `nelly init --from`) like any
+other untrusted artifact — review them before deploying.
+
+The validator (`nelly validate`) enforces these rules on every state-changing
+command. They are the protections an untrusted config has to defeat:
+
+- **App `entrypoint` is restricted to `[A-Za-z0-9_./-]+`**, with no `..`
+  or leading `/`. This eliminates the cron-injection path: the assembled
+  crontab invokes `python` directly with the entrypoint as an argv item —
+  no shell wrapping, no quoting concerns.
+- **Local source paths must be absolute, must not contain `..`**, and may
+  not point at obvious system directories (`/`, `/etc`, `/root`, `/proc`,
+  `/sys`, `/dev`, `/boot`, `/var/run/docker.sock`).
+- **Volume host sides must be absolute, must not contain `..`**, and are
+  subject to the same system-directory deny-list as local sources, plus
+  `/var/lib/docker[/…]`.
+- **Hook paths must be relative**, must not contain `..`, and must resolve
+  (via `realpath -m`) to a file under the deployment directory. Hooks
+  run on the host with the invoking user's privileges — they are not
+  sandboxed.
+- **Git URLs and refs must not begin with `-`**, closing the
+  CVE-2017-1000117-class argument-injection vector. Every `git clone` /
+  `ls-remote` / `checkout` invocation in Nelly also uses the `--`
+  argument terminator as defense-in-depth.
+- **Tags, image names, container names, package names** are all anchored
+  to their respective POSIX-safe character classes.
+
+If you genuinely need to escape one of the path deny-lists (e.g. a
+read-only mount of `/etc/letsencrypt/live`), set the corresponding
+opt-in **at the top level of the config**:
+
+```jsonc
+{
+  "allow_dangerous_volumes": true,   // skips the volume deny-list
+  "allow_dangerous_paths":   true,   // skips the local-source deny-list
+  ...
+}
+```
+
+This is an explicit, file-visible decision rather than a hidden flag.
+
+### Threat model assumptions
+
+- The host running `nelly` is trusted; the user running `nelly` is trusted.
+- Configs you author yourself are trusted.
+- **Configs imported from elsewhere are not trusted** — the validator,
+  the entrypoint runtime check in `lib/manage.sh`, and the hook
+  runtime check in `lib/hooks.sh` are designed to catch malicious imports
+  before they execute anything on the host.
+- The cron jobs *inside* the container run as root inside the container.
+  Container escape is out of scope — that's docker's responsibility.
+  What's in scope: making sure the *configuration* doesn't hand the
+  container the keys to the host (via dangerous mounts, hostile git URLs,
+  or hook scripts pointing at arbitrary host binaries).
+
+### Reporting
+
+Found something the validator misses? Please open an issue with the
+shortest config that reproduces the bypass.
+
+---
+
 ## Troubleshooting
 
 **`config validation failed: …`**

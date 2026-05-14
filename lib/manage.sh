@@ -117,8 +117,16 @@ case "$sub" in
         ep="$(jq -r --arg n "$APP" '.apps[] | select(.app_name==$n) | .entrypoint // empty' \
               "$DEPLOY_DIR/def/config.json")"
         [[ -n "$ep" ]] || die "app $APP has no entrypoint in config.json"
+        # Defense-in-depth: even though validate_config restricts the
+        # characters allowed in entrypoint, re-check here so this code
+        # path stays safe if something edits config.json in-flight.
+        [[ "$ep" =~ ^[A-Za-z0-9_./-]+$ && "$ep" != /* && "$ep" != *..* ]] \
+            || die "entrypoint '$ep' contains unsafe characters; refusing to run"
         info "running $APP/$ep in $CN"
-        docker exec "$CN" /bin/bash -lc "cd /home/apps/$APP && /opt/venvs/$APP/bin/python $ep"
+        # Pass python and the entrypoint as separate argv entries — no shell
+        # interpolation, no quoting concerns.
+        docker exec -w "/home/apps/$APP" "$CN" \
+            "/opt/venvs/$APP/bin/python" "/home/apps/$APP/$ep"
         ;;
 
     top)

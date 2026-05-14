@@ -51,7 +51,7 @@ for app in "${APPS[@]}"; do
             url="$(echo "$app" | jq -r '.source.url // .git_url')"
             ref="$(echo "$app" | jq -r '.source.ref // .ref // .branch // "main"')"
             if command -v git >/dev/null 2>&1; then
-                if git ls-remote --exit-code "$url" "$ref" >/dev/null 2>&1; then
+                if git ls-remote --exit-code -- "$url" "$ref" >/dev/null 2>&1; then
                     ok "git source reachable: $aname ($url @ $ref)"
                 else
                     bad "git source not reachable: $aname ($url @ $ref) — check URL, ref, and SSH credentials"

@@ -24,8 +24,27 @@ run_hook() {
     local path; path="$(jqget "$config" ".hooks.$hook" "")"
     [[ -n "$path" ]] || return 0
 
-    local resolved="$path"
-    [[ "$path" != /* ]] && resolved="$deploy_dir/$path"
+    # Defense-in-depth: validate_config already rejects absolute paths and '..',
+    # but re-check here so this code path is safe even if validation was
+    # bypassed (e.g. the config was edited in-flight between validate and run).
+    # Hooks run on the host with the invoking user's privileges — keep them
+    # strictly confined to files under the deployment directory.
+    if [[ "$path" == /* ]]; then
+        warn "hook '$hook' path is absolute; refusing to run ($path)"
+        return 0
+    fi
+    if [[ "$path" == *..* ]]; then
+        warn "hook '$hook' path contains '..'; refusing to run ($path)"
+        return 0
+    fi
+    local resolved
+    resolved="$(realpath -m -- "$deploy_dir/$path" 2>/dev/null || true)"
+    case "$resolved" in
+        "$deploy_dir"/*) : ;;
+        *)
+            warn "hook '$hook' escapes the deployment dir: $path → $resolved; refusing to run"
+            return 0 ;;
+    esac
     [[ -x "$resolved" ]] || { warn "hook '$hook' not executable: $resolved (skipping)"; return 0; }
 
     local image=""

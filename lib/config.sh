@@ -66,12 +66,42 @@ validate_config() {
         local has_src; has_src="$(jq "($prefix.source != null) or ($prefix.git_url != null)" "$config")"
         [[ "$has_src" == "true" ]] || errors+=("$prefix needs .source or legacy .git_url")
 
+        # Validate the source contents. URLs/refs/paths must not start with '-'
+        # (git argument injection), local paths must not be obvious system dirs.
+        local sa_url sa_ref sa_path
+        sa_url="$(jq -r  "$prefix.source.url  // .apps[$i].git_url  // empty" "$config")"
+        sa_ref="$(jq -r  "$prefix.source.ref  // .apps[$i].ref      // .apps[$i].branch // empty" "$config")"
+        sa_path="$(jq -r "$prefix.source.path // empty" "$config")"
+        case "$sa_url"  in -*) errors+=("$prefix.source.url must not start with '-' (got: $sa_url)");; esac
+        case "$sa_ref"  in -*) errors+=("$prefix.source.ref must not start with '-' (got: $sa_ref)");; esac
+
         if [[ "$(jq "$prefix.source != null" "$config")" == "true" ]]; then
             local stype; stype="$(jq -r "$prefix.source.type" "$config")"
             case "$stype" in
-                git)   [[ "$(jq "$prefix.source.url"  "$config")" != "null" ]] || errors+=("$prefix.source.url missing");;
-                local) [[ "$(jq "$prefix.source.path" "$config")" != "null" ]] || errors+=("$prefix.source.path missing");;
-                *)     errors+=("$prefix.source.type '$stype' invalid (git|local)");;
+                git)
+                    [[ -n "$sa_url" && "$sa_url" != "null" ]] \
+                        || errors+=("$prefix.source.url missing")
+                    ;;
+                local)
+                    [[ -n "$sa_path" ]] \
+                        || errors+=("$prefix.source.path missing")
+                    if [[ -n "$sa_path" ]]; then
+                        [[ "$sa_path" == /* ]] \
+                            || errors+=("$prefix.source.path must be an absolute path (got: $sa_path)")
+                        [[ "$sa_path" == *..* ]] \
+                            && errors+=("$prefix.source.path must not contain '..' (got: $sa_path)")
+                        # Refuse obvious system dirs unless explicitly opted-in.
+                        local _allow_path
+                        _allow_path="$(jqget "$config" '.allow_dangerous_paths' 'false')"
+                        if [[ "$_allow_path" != "true" ]]; then
+                            case "$sa_path" in
+                                /|/etc|/etc/*|/root|/root/*|/proc|/proc/*|/sys|/sys/*|/dev|/dev/*|/boot|/boot/*|/var/run/docker.sock)
+                                    errors+=("$prefix.source.path '$sa_path' is a forbidden system path (set .allow_dangerous_paths=true to override)") ;;
+                            esac
+                        fi
+                    fi
+                    ;;
+                *) errors+=("$prefix.source.type '$stype' invalid (git|local)") ;;
             esac
         fi
 
@@ -84,6 +114,17 @@ validate_config() {
         fi
         if [[ -n "$sched" ]]; then
             _validate_cron "$sched" || errors+=("$prefix.schedule '$sched' is not a valid 5-field cron expression")
+        fi
+        # Entrypoint is interpolated into the container crontab. Disallow shell
+        # metacharacters, '..', and leading '/' (entrypoint is relative to the
+        # app's source dir).
+        if [[ -n "$ep" ]]; then
+            [[ "$ep" =~ ^[A-Za-z0-9_./-]+$ ]] \
+                || errors+=("$prefix.entrypoint must match [A-Za-z0-9_./-]+ (got: $ep)")
+            [[ "$ep" == /* ]] \
+                && errors+=("$prefix.entrypoint must be relative to the app's source dir (got: $ep)")
+            [[ "$ep" == *..* ]] \
+                && errors+=("$prefix.entrypoint must not contain '..' (got: $ep)")
         fi
         i=$((i+1))
     done
@@ -118,15 +159,55 @@ validate_config() {
             || errors+=(".tags entry '$t' invalid (use [a-zA-Z0-9_-])")
     done
 
-    # Hooks
+    # Hooks — must be relative paths confined under deploy_dir. Hooks run on
+    # the host with the invoking user's privileges, so this is a security
+    # boundary, not just a style guide.
     local hook
     for hook in pre_deploy post_deploy on_failure; do
         local hp; hp="$(jqget "$config" ".hooks.$hook")"
-        if [[ -n "$hp" ]]; then
-            # Path can be relative to deploy_dir or absolute
-            local resolved="$hp"
-            [[ "$hp" != /* ]] && resolved="$deploy_dir/$hp"
-            [[ -f "$resolved" ]] || errors+=(".hooks.$hook points at missing file: $hp")
+        [[ -z "$hp" ]] && continue
+        if [[ "$hp" == /* ]]; then
+            errors+=(".hooks.$hook must be a path relative to the deployment dir (got: $hp)")
+            continue
+        fi
+        if [[ "$hp" == *..* ]]; then
+            errors+=(".hooks.$hook must not contain '..' (got: $hp)")
+            continue
+        fi
+        local resolved; resolved="$(realpath -m -- "$deploy_dir/$hp" 2>/dev/null || true)"
+        case "$resolved" in
+            "$deploy_dir"/*) : ;;
+            *) errors+=(".hooks.$hook escapes the deployment dir: $hp → $resolved") ; continue ;;
+        esac
+        [[ -f "$resolved" ]] || errors+=(".hooks.$hook points at missing file: $hp")
+    done
+
+    # Volumes — config-supplied -v entries. Block mounting obvious host
+    # secrets / system paths unless allow_dangerous_volumes is set.
+    local _allow_vol
+    _allow_vol="$(jqget "$config" '.allow_dangerous_volumes' 'false')"
+    mapfile -t _VOLS < <(jq -r '.volumes[]?' "$config")
+    for v in "${_VOLS[@]}"; do
+        # docker -v supports HOST:CONTAINER and HOST:CONTAINER:MODE
+        if [[ ! "$v" =~ ^[A-Za-z0-9_./-]+:/[A-Za-z0-9_./-]+(:(ro|rw|z|Z|ro,Z|rw,Z))?$ ]]; then
+            errors+=(".volumes entry '$v' invalid (expected HOST_PATH:CONTAINER_PATH[:mode])")
+            continue
+        fi
+        local host_side="${v%%:*}"
+        # Reject anything containing '..' or not absolute.
+        if [[ "$host_side" != /* ]]; then
+            errors+=(".volumes host side '$host_side' must be an absolute path")
+            continue
+        fi
+        if [[ "$host_side" == *..* ]]; then
+            errors+=(".volumes host side '$host_side' must not contain '..'")
+            continue
+        fi
+        if [[ "$_allow_vol" != "true" ]]; then
+            case "$host_side" in
+                /|/etc|/etc/*|/root|/root/*|/proc|/proc/*|/sys|/sys/*|/dev|/dev/*|/boot|/boot/*|/var/run/docker.sock|/var/lib/docker|/var/lib/docker/*)
+                    errors+=(".volumes host side '$host_side' is forbidden (set .allow_dangerous_volumes=true to override)") ;;
+            esac
         fi
     done
 

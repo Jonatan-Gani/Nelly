@@ -66,11 +66,13 @@ for app in "${APPS[@]}"; do
     fi
     SCHEDULED=$((SCHEDULED+1))
 
-    # Each cron line runs as root, chdir's to /home/apps/<app>, uses the app's
-    # own venv, and logs to /var/log/nelly/<app>.log (bind-mounted).
-    cmd="cd /home/apps/$name && /opt/venvs/$name/bin/python $entry"
+    # Each cron line runs as root, invokes the app's venv python with an
+    # absolute path entrypoint, and logs to /var/log/nelly/<app>.log (bind
+    # mount). No shell wrapper / no 'cd' is used because the value of
+    # $entry comes from config and is validated to be a relative path with
+    # safe characters only — see lib/config.sh::validate_config.
     log="/var/log/nelly/$name.log"
-    echo "$sched root /bin/bash -lc '$cmd' >> $log 2>&1" >> "$CRONTAB"
+    echo "$sched root /opt/venvs/$name/bin/python /home/apps/$name/$entry >> $log 2>&1" >> "$CRONTAB"
 done
 # /etc/cron.d files MUST end with a newline.
 printf '\n' >> "$CRONTAB"

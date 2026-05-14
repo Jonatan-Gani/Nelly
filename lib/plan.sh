@@ -38,7 +38,7 @@ for app in "${APPS[@]}"; do
             [[ -f "$LOCKFILE" ]] && old="$(jq -r --arg n "$aname" '.[$n] // "(none)"' "$LOCKFILE")"
             new="(unknown)"
             if command -v git >/dev/null 2>&1; then
-                new="$(git ls-remote "$url" "$ref" 2>/dev/null | awk 'NR==1{print $1}')"
+                new="$(git ls-remote -- "$url" "$ref" 2>/dev/null | awk 'NR==1{print $1}')"
                 [[ -z "$new" ]] && new="(unresolved: $ref)"
             fi
             if [[ "$old" == "$new" ]]; then

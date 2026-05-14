@@ -218,6 +218,84 @@ else
 fi
 
 # ----------------------------------------------------------------------------
+section "security: dangerous inputs are rejected"
+
+# Entrypoint must not contain shell metacharacters (was: cron injection → RCE).
+if bin/nelly app add "$NAME" --name shellinject --local /tmp \
+       --schedule "*/5 * * * *" --entrypoint "x.py; rm -rf /" >/dev/null 2>&1; then
+    fail "accepted entrypoint with shell metachars"
+else
+    pass "rejected entrypoint with shell metachars"
+fi
+if bin/nelly app add "$NAME" --name dotdot --local /tmp \
+       --schedule "*/5 * * * *" --entrypoint "../../etc/passwd" >/dev/null 2>&1; then
+    fail "accepted entrypoint with '..'"
+else
+    pass "rejected entrypoint with '..'"
+fi
+
+# Local source path must not be a system dir (without an explicit opt-in).
+if bin/nelly app add "$NAME" --name etcsrc --local /etc \
+       --schedule "*/5 * * * *" --entrypoint x.py >/dev/null 2>&1; then
+    fail "accepted local source = /etc"
+else
+    pass "rejected local source pointing at /etc"
+fi
+
+# Git argument injection: refs/URLs starting with '-' are refused.
+if bin/nelly app add "$NAME" --name dashref \
+       --git "git@example.com:me/x.git" --ref "-evil" \
+       --schedule "*/5 * * * *" --entrypoint x.py >/dev/null 2>&1; then
+    fail "accepted ref starting with '-'"
+else
+    pass "rejected ref starting with '-'"
+fi
+if bin/nelly app add "$NAME" --name dashurl \
+       --git "--upload-pack=/tmp/evil" \
+       --schedule "*/5 * * * *" --entrypoint x.py >/dev/null 2>&1; then
+    fail "accepted git URL starting with '-'"
+else
+    pass "rejected git URL starting with '-'"
+fi
+
+# Volumes: must not be a deny-listed host path without opt-in.
+if bin/nelly set "$NAME" '.volumes' '["/:/host"]' >/dev/null 2>&1; then
+    fail "accepted root bind mount"
+else
+    pass "rejected root bind mount"
+fi
+if bin/nelly set "$NAME" '.volumes' '["/etc:/x"]' >/dev/null 2>&1; then
+    fail "accepted /etc bind mount"
+else
+    pass "rejected /etc bind mount"
+fi
+if bin/nelly set "$NAME" '.volumes' '["/var/run/docker.sock:/var/run/docker.sock"]' >/dev/null 2>&1; then
+    fail "accepted docker.sock bind mount"
+else
+    pass "rejected docker.sock bind mount"
+fi
+# Allow-listed paths still work
+if bin/nelly set "$NAME" '.volumes' '["/srv/data:/data:ro"]' >/dev/null 2>&1; then
+    pass "accepted safe volume"
+else
+    fail "rejected safe volume"
+fi
+bin/nelly set "$NAME" '.volumes' '[]' >/dev/null 2>&1
+
+# Hooks: absolute paths and '..' both refused.
+if bin/nelly set "$NAME" '.hooks.pre_deploy' '/usr/bin/curl' >/dev/null 2>&1; then
+    fail "accepted absolute hook path"
+else
+    pass "rejected absolute hook path"
+fi
+if bin/nelly set "$NAME" '.hooks.pre_deploy' '../../etc/shadow' >/dev/null 2>&1; then
+    fail "accepted hook path with '..'"
+else
+    pass "rejected hook path with '..'"
+fi
+bin/nelly set "$NAME" '.hooks.pre_deploy' '' >/dev/null 2>&1
+
+# ----------------------------------------------------------------------------
 section "doctor (offline-friendly)"
 bin/nelly doctor "$NAME" >/dev/null 2>&1 || true
 # we just want it to have run; non-zero is expected here (no docker daemon in test env)
