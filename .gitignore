@@ -13,3 +13,7 @@
 # Keep the empty folders around so a fresh clone has the layout.
 !/containers/template/apps/.gitkeep
 !/containers/template/logs/.gitkeep
+
+# Telegram bot state is per-host and contains secrets.
+/bot/
+lib/__pycache__/

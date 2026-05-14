@@ -30,6 +30,7 @@ section() { printf '\n== %s ==\n' "$*"; }
 
 cleanup() {
     rm -rf containers/smoketest-* /tmp/nelly-smoke-*.json /tmp/nelly-smoke-*.tar.gz 2>/dev/null || true
+    rm -rf bot 2>/dev/null || true
 }
 trap cleanup EXIT
 
@@ -61,6 +62,7 @@ bin/nelly help >/dev/null 2>&1         && pass "help renders"       || fail "hel
 bin/nelly help deploy >/dev/null 2>&1  && pass "help deploy"        || fail "help deploy"
 bin/nelly help export >/dev/null 2>&1  && pass "help export"        || fail "help export"
 bin/nelly help all >/dev/null 2>&1     && pass "help all"           || fail "help all"
+bin/nelly help bot >/dev/null 2>&1     && pass "help bot"           || fail "help bot"
 
 # ----------------------------------------------------------------------------
 section "init (non-interactive) → validate"
@@ -300,6 +302,67 @@ section "doctor (offline-friendly)"
 bin/nelly doctor "$NAME" >/dev/null 2>&1 || true
 # we just want it to have run; non-zero is expected here (no docker daemon in test env)
 pass "doctor ran"
+
+# ----------------------------------------------------------------------------
+section "telegram bot wiring"
+# Python module must compile
+if python3 -m py_compile lib/bot.py 2>/dev/null; then
+    pass "bot.py compiles"
+else
+    fail "bot.py syntax error"
+fi
+# bot subcommand surfaces help
+if bin/nelly bot 2>&1 | grep -q "bot <sub>"; then pass "bot help"; else fail "bot help"; fi
+
+# allow/revoke round-trip — should NOT need a real token, just writes config.
+rm -rf bot
+bin/nelly bot allow 12345 >/dev/null 2>&1
+[[ "$(jq -r '.allowed_users | join(",")' bot/config.json 2>/dev/null)" == "12345" ]] \
+    && pass "bot allow writes config" || fail "bot allow"
+[[ "$(stat -c %a bot/config.json)" == "600" ]] \
+    && pass "bot config mode 0600" || fail "bot config mode: $(stat -c %a bot/config.json)"
+bin/nelly bot allow 67890 >/dev/null 2>&1
+[[ "$(jq -r '.allowed_users | sort | join(",")' bot/config.json)" == "12345,67890" ]] \
+    && pass "bot allow dedupes" || fail "bot allow dedupe"
+bin/nelly bot revoke 12345 >/dev/null 2>&1
+[[ "$(jq -r '.allowed_users | join(",")' bot/config.json)" == "67890" ]] \
+    && pass "bot revoke" || fail "bot revoke"
+
+# Reject non-numeric user IDs.
+if bin/nelly bot allow 'rm -rf /' >/dev/null 2>&1; then
+    fail "accepted non-numeric user id"
+else
+    pass "rejected non-numeric user id"
+fi
+
+# systemd unit generation writes to a temp HOME so we don't pollute the user's
+# real ~/.config.
+SYSD_HOME="$(mktemp -d)"
+if HOME="$SYSD_HOME" XDG_CONFIG_HOME="$SYSD_HOME/.config" bin/nelly bot install-systemd >/dev/null 2>&1; then
+    unit="$SYSD_HOME/.config/systemd/user/nelly-bot.service"
+    if [[ -f "$unit" ]] && grep -q "ExecStart=.*bin/nelly bot start" "$unit"; then
+        pass "install-systemd writes unit"
+    else
+        fail "install-systemd unit missing or malformed"
+    fi
+else
+    fail "install-systemd failed"
+fi
+rm -rf "$SYSD_HOME"
+
+# notify with no recipients must refuse.
+rm -rf bot
+echo "fake" > /tmp/nelly-fake-token-$$
+mkdir -p bot
+mv /tmp/nelly-fake-token-$$ bot/.token; chmod 600 bot/.token
+echo '{"allowed_users": [], "allow_writes": false, "notify_chat_id": null}' > bot/config.json
+chmod 600 bot/config.json
+if bin/nelly bot notify "hello" >/dev/null 2>&1; then
+    fail "notify with no recipients should fail"
+else
+    pass "notify refuses with no recipients"
+fi
+rm -rf bot
 
 # ----------------------------------------------------------------------------
 section "list --json"

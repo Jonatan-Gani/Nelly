@@ -575,6 +575,121 @@ rather than guess.
 
 ---
 
+## Telegram bot (optional, secure remote monitoring)
+
+If you want to check on your deployments from your phone — and optionally
+trigger restarts/deploys/rollbacks from there — Nelly ships an optional
+Telegram bot. It runs on the same host as Nelly, talks to Telegram via
+long-polling (no public endpoint required), and is **locked to an
+allow-list of Telegram user IDs**. Anyone not on the list is silently
+dropped; the bot never confirms it exists to a wrong audience.
+
+### Setup (one-time)
+
+```sh
+# 1. Talk to @BotFather on Telegram → /newbot → copy the token.
+
+# 2. Run the setup wizard. It will:
+#    - validate the token against the Telegram API
+#    - ask you to message the bot once, then auto-detect your user id
+#    - ask whether to enable write commands (start/stop/deploy/rollback)
+#    - send a hello message to confirm wiring
+nelly bot setup
+
+# 3. (recommended) install a user systemd unit so the bot survives reboots:
+nelly bot install-systemd
+systemctl --user daemon-reload
+systemctl --user enable --now nelly-bot
+sudo loginctl enable-linger "$USER"     # keep running after logout
+
+# Or just run it in the foreground:
+nelly bot start
+```
+
+Add more allowed users later:
+```sh
+nelly bot allow  123456789
+nelly bot revoke 987654321
+nelly bot status                 # is it running? recent activity?
+```
+
+### Bot commands (from Telegram)
+
+Read-only (always available):
+
+| Command            | What it does                              |
+| ------------------ | ----------------------------------------- |
+| `/help`            | List available commands                   |
+| `/list`            | All deployments + state                   |
+| `/status <name>`   | One deployment's status                   |
+| `/ps`              | docker ps over nelly-managed containers   |
+| `/stats`           | live cpu / memory / pids                  |
+| `/logs <name> [app]` | Last 30 lines of cron output            |
+| `/cron <name>`     | What's scheduled, in plain English        |
+| `/explain <name>`  | Deployment summary                        |
+| `/doctor <name>`   | Pre-flight checks                         |
+| `/events <name>`   | Recent docker events                      |
+| `/id`              | Print your own Telegram user id           |
+
+Write-capable (only when `allow_writes: true` in `bot/config.json`):
+
+| Command                       | What it does                                       |
+| ----------------------------- | -------------------------------------------------- |
+| `/start_dep <name>`           | `docker start`                                     |
+| `/stop_dep <name>`            | `docker stop`                                      |
+| `/restart_dep <name>`         | `docker restart`                                   |
+| `/runnow <name> <app>`        | Trigger one app run immediately                    |
+| `/deploy <name>`              | Full deploy with `--wait-healthy 60 --auto-rollback` |
+| `/rollback <name>`            | Switch to previous build                           |
+
+Toggle writes any time:
+```sh
+nelly set-jq() { jq "$2 = $3" "$1" > "$1.tmp" && mv "$1.tmp" "$1"; }
+# (or just edit bot/config.json by hand — it's a one-liner)
+```
+The bot re-reads its config on every poll, so changes take effect without
+a restart.
+
+### Proactive notifications (recommended)
+
+`nelly bot notify "<msg>"` sends a message to every allowed user (or to
+`notify_chat_id` if set). It works whether or not the bot daemon is
+running — it just hits the Telegram API directly. Wire it into your
+deploy hooks for free push notifications:
+
+```sh
+# def/hooks/notify.sh  (chmod +x)
+#!/usr/bin/env bash
+case "$NELLY_HOOK" in
+    post_deploy) /usr/local/bin/nelly bot notify "✅ $NELLY_DEPLOYMENT deployed as $NELLY_IMAGE" ;;
+    on_failure)  /usr/local/bin/nelly bot notify "❌ $NELLY_DEPLOYMENT failed to deploy" ;;
+esac
+```
+
+```sh
+nelly set scraper '.hooks.post_deploy' '"./def/hooks/notify.sh"'
+nelly set scraper '.hooks.on_failure'  '"./def/hooks/notify.sh"'
+```
+
+### Security model for the bot
+
+| Concern               | Mitigation                                                                                       |
+| --------------------- | ------------------------------------------------------------------------------------------------ |
+| Token leak            | Token lives at `bot/.token`, mode 0600, never echoed to logs. Replace and restart to rotate.     |
+| Unknown senders       | Allow-list of numeric Telegram user IDs. Anything else is **silently dropped** (no reply).       |
+| Command injection     | Every command maps to a fixed `nelly <subcommand>` invocation with `shell=False`. Arguments validated by regex (`[A-Za-z0-9_.-]+`). |
+| Mutating actions      | Disabled by default. Need to flip `allow_writes: true` in `bot/config.json` to enable any write. |
+| Token sprawl          | The CLI rejects tokens that don't match Telegram's format. systemd unit hardened with `NoNewPrivileges`, `PrivateTmp`, `ProtectSystem=full`, `ProtectHome=read-only`. |
+| Rate / flood          | Per-user sliding window: 30 commands / 60 s. Excess gets a one-line "slow down" reply and a log entry. |
+| Audit trail           | `bot/bot.log` (append-only) records every command attempt: who, what, when, outcome.             |
+| Allowed-update types  | The bot subscribes only to `message` updates from Telegram; everything else is ignored.          |
+
+The bot daemon **only invokes `nelly` subcommands** — it never executes
+arbitrary shell, never builds command strings, and runs Python with the
+stdlib only (no pip install, no transitive dependencies).
+
+---
+
 ## Security model
 
 Nelly's trust boundary is the **deployment config file**. Anything inside

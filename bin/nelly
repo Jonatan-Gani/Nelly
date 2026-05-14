@@ -54,6 +54,9 @@ $(_bold "Across many deployments")
   $(_bold "nelly all list")             $(_dim "# tag-aware listing")
   $(_bold "nelly all deploy --tag prod") $(_dim "# act on a group")
 
+$(_bold "Monitor from your phone")
+  $(_bold "nelly bot setup")            $(_dim "# wire up a Telegram bot (allow-listed users only)")
+
 $(_bold "Prefer to edit config.json directly?") That's also fine — config is the source of truth.
   $(_bold "nelly edit    <name>")       $(_dim "# opens \$EDITOR; validates on save")
   $(_bold "nelly plan    <name>")       $(_dim "# show what deploy will do, no side effects")
@@ -144,6 +147,15 @@ $(_bold "ACROSS MANY DEPLOYMENTS")
   all <cmd>  [--tag T]... [--fail-fast]
                                          Run <cmd> against every matching deployment
   all list                              Tag-aware deployment list
+
+$(_bold "TELEGRAM BOT")  $(_dim "(secure remote monitoring + lifecycle from your phone)")
+  bot setup                             Interactive: token, allowed users, write flag
+  bot start                             Run the bot daemon (foreground)
+  bot status                            Is it running? + recent activity
+  bot notify <message>                  One-shot push to allowed users (use in hooks)
+  bot test                              Send a "hello" to confirm wiring
+  bot allow|revoke <user_id>            Manage the allowed-users list
+  bot install-systemd                   Install a user systemd unit
 
 $(_bold "GLOBAL FLAGS")
   --json                   machine-readable output where supported
@@ -288,6 +300,34 @@ $(_bold "nelly rollback <name>")
 EOF
             ;;
 
+        bot) cat <<EOF
+$(_bold "nelly bot <sub> ...")
+
+Telegram bot for monitoring + lifecycle from your phone.
+
+   bot setup                  Interactive setup. Asks for the token (from
+                              @BotFather), auto-detects your user id when you
+                              message the bot, optionally enables write
+                              commands (start/stop/deploy/rollback).
+   bot start                  Run the bot daemon in the foreground.
+   bot install-systemd        Generate a user systemd unit so it survives
+                              reboot and restarts on crash.
+   bot status                 Is it running? Recent activity.
+   bot notify <message>       Push a message to all allowed users from
+                              anywhere — perfect for deploy hooks:
+                                  config.hooks.post_deploy =
+                                  './def/hooks/notify.sh'
+                                  # contents: nelly bot notify "✅ \$NELLY_DEPLOYMENT"
+   bot test                   Send a hello to verify wiring.
+   bot allow  <user_id>       Add a user to the allow-list.
+   bot revoke <user_id>       Remove a user.
+
+Security: token is mode-0600, only user IDs in allowed_users get any reply,
+unknown users are silently dropped, write commands are gated on
+allow_writes:true in bot/config.json, every command is audit-logged to
+bot/bot.log.
+EOF
+            ;;
         cron) echo "nelly cron <name> [--next N]: print the assembled crontab in human-readable form. --next N adds the next N run times per app (requires python3 on the host)." ;;
         events) echo "nelly events <name> [--since DURATION]: stream docker events for the container. Ctrl-C to stop." ;;
         plan)   echo "nelly plan <name>: print what 'nelly deploy' would do, with no side effects." ;;
@@ -502,6 +542,10 @@ case "$cmd" in
     # ---- across many deployments --------------------------------------
     all)
         "$LIB/all.sh" "$@" ;;
+
+    # ---- Telegram bot --------------------------------------------------
+    bot)
+        "$LIB/bot.sh" "$@" ;;
 
     *)
         err "unknown command: $cmd"
