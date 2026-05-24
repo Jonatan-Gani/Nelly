@@ -42,7 +42,7 @@ Nelly is built so you can use whichever fits your moment:
 
 ## Contents
 
-1. [Install](#install)
+1. [Install](#install) (see [INSTALL.md](INSTALL.md) for the full guide)
 2. [Five-minute tutorial](#five-minute-tutorial)
 3. [Loading a deployment from a file](#loading-a-deployment-from-a-file)
 4. [Editing config.json directly](#editing-configjson-directly)
@@ -50,28 +50,38 @@ Nelly is built so you can use whichever fits your moment:
 6. [Command map](#command-map)
 7. [Recipes](#recipes)
 8. [Configuration reference](#configuration-reference)
-9. [Architecture](#architecture)
-10. [Troubleshooting](#troubleshooting)
-11. [Development](#development)
+9. [Production hardening (v0.5+)](#production-hardening-v05)
+10. [Releases & metrics](#releases--metrics-version-control-for-whats-deployed)
+11. [Telegram bot](#telegram-bot-optional-secure-remote-monitoring)
+12. [Security model](#security-model)
+13. [Architecture](#architecture)
+14. [Troubleshooting](#troubleshooting)
+15. [Development](#development)
 
 ---
 
 ## Install
 
-Host requirements: Docker 20+, `bash`, `jq`, `git`, `rsync`. Optional:
-`flock` (concurrency-safe locks), `shellcheck` (development),
-`python3` (cron next-run preview).
+For a Debian / Ubuntu host (the usual case), the fastest path is the
+one-shot bootstrap:
 
 ```sh
-git clone <this-repo> ~/nelly
+git clone https://github.com/Jonatan-Gani/Nelly.git ~/nelly
 cd ~/nelly
-ln -s "$PWD/bin/nelly" ~/.local/bin/nelly   # optional — puts `nelly` on $PATH
-nelly --version
-nelly                                       # short intro + happy-path commands
+bash install.sh                  # asks for sudo once; installs docker + deps
+nelly --version                  # → "nelly 0.5.0"
 ```
 
+The full installation guide — manual steps, Docker repo setup, systemd
+service, troubleshooting, uninstall — is in **[INSTALL.md](INSTALL.md)**.
+
+Host requirements: Debian 11+ / Ubuntu 22.04+ (other Linux works, you'll
+just need to translate `apt`). Required packages: `docker` 20+, `bash`,
+`jq`, `git`, `rsync`. Optional: `flock` (concurrency-safe locks),
+`shellcheck` (development), `python3` (next-run preview + Telegram bot).
+
 Nelly is a stateless wrapper around `docker` + `git` + `jq`. All persistent
-state lives under `containers/<deployment>/`.
+state lives under `containers/<deployment>/` and `bot/`.
 
 ---
 
@@ -282,7 +292,7 @@ half-broken.
 ### Manage config / secrets
 - `nelly edit / show / get / set / validate <name>`
 - `nelly tag <name> add|remove|list TAG…`
-- `nelly secrets set/unset/list/edit/template <name> …`
+- `nelly secrets set/unset/list/edit/template <name> [--app APP] …`
 
 ### Lifecycle
 - `nelly start / stop / restart <name>`
@@ -301,18 +311,36 @@ half-broken.
 - `nelly logs <name> [app]` — tail container logs
 - `nelly events <name> [--since DUR]` — docker events stream
 - `nelly cron <name> [--next N]` — what's scheduled, in English
-- `nelly prune <name>` — delete old log files
+- `nelly metrics <name> [--app A] [--since DUR] [--release REL]` — per-app run stats
+- `nelly prune <name>` — delete old logs + metrics files
+
+### Releases (every deploy is a tracked, revertable record)
+- `nelly release list <name>`
+- `nelly release show <name> [rel_id]`
+- `nelly release diff <name> <a> <b>`
+- `nelly release restore <name> <rel_id> [--image-only|--config-only]`
+- `nelly release note <name> <rel_id> "<text>"`
+- `nelly release prune <name> [--keep N]`
+
+### Image management
+- `nelly image-prune <name> [--keep N] [--dry-run]` — auto-runs after deploy
+- `nelly base-image-pin <name> [<image:tag>]` — resolves to a sha256 digest
 
 ### Share / migrate / back up
 - `nelly export <name>` (`--include-secrets`, `--include-lockfile`)
 - `nelly import <file|-> [--as <name>] [--force]`
 - `nelly clone <src> <dest>`
-- `nelly backup <name> [--out PATH] [--include-logs]`
+- `nelly backup <name> [--out PATH] [--include-logs] [--include-secrets]`
 - `nelly restore <tarball> [--as <name>] [--force]`
 
 ### Across many deployments
 - `nelly all list [--tag T]…`
 - `nelly all <cmd> [--tag T]… [--fail-fast]`
+
+### Telegram bot
+- `nelly bot setup / start / status / install-systemd`
+- `nelly bot notify <message>` — push to all allowed users (use in hooks)
+- `nelly bot allow / revoke <user_id>`
 
 ### Global flags
 - `--json` — machine-readable output where supported
@@ -443,6 +471,10 @@ jobs:
 
   "tags": ["prod", "team-a"],
 
+  // Pin the base image to a sha256 digest for reproducible builds.
+  // Use `nelly base-image-pin <name>` to write/refresh this value.
+  "base_image": "python:3.11-slim@sha256:abc1234…",
+
   "apps": [
     {
       "app_name":   "fetcher",
@@ -524,6 +556,7 @@ Each hook gets these env vars:
 
 ```
 bin/nelly                arg parsing + dispatch (the only entry point users touch)
+install.sh               one-shot Debian/Ubuntu installer
 lib/
   common.sh              logging, locking, jq helpers, names, output mode
   wizard.sh              interactive prompts + init/add-app/add-secrets wizards
@@ -531,34 +564,48 @@ lib/
   app.sh                 `nelly app …` dispatcher (uses wizard or flags)
   source.sh              fetch_source() — git or local; returns resolved rev
   fetch.sh               iterate apps[], delegate to source.sh, update lockfile
-  build.sh               render Dockerfile + crontab, tag image w/ lockfile hash
+  build.sh               render Dockerfile + crontab + nelly-run wrapper;
+                         substitute pinned base_image; tag image w/ lockfile hash
   run.sh                 docker run (argv array, no eval) — resources, health,
                          multi-network, aliases, labels, hostname, dns, hosts,
-                         wait-healthy + auto-rollback
+                         wait-healthy + auto-rollback,
+                         bind-mounts per-app secrets dir read-only
   manage.sh              start/stop/restart/exec/shell/attach/run-now/top/inspect
   stats.sh               ps + stats over nelly-managed containers
   list.sh                every deployment + state
   status.sh              one deployment's state + pinned commits
   logs.sh                tail per-app cron logs
-  events.sh              stream docker events
+  events.sh              stream docker events for one deployment
   cron.sh                human-readable crontab + next-run preview
   diff.sh                preview what fetch would change
   plan.sh                preview the full deploy pipeline (no side effects)
   rollback.sh            switch to a previous image tag
-  secrets.sh             manage .env with mode 0600 + key validation
+  secrets.sh             manage def/.env (global) + def/secrets/<app>.env (per-app)
   push.sh                docker cp into a running container
   explain.sh             plain-English summary
-  doctor.sh              pre-flight checks
+  doctor.sh              pre-flight checks (config, secrets, base image, …)
   hooks.sh               run pre_deploy / post_deploy / on_failure
   portable.sh            export / import / clone / init-from
-  backup.sh              backup / restore tarball
+  backup.sh              tarball backup + restore (secrets excluded by default)
+  release.sh             create/finalize/list/show/diff/restore release records
+  metrics.sh             aggregate per-app run metrics from .jsonl files
+  image-prune.sh         keep last N successful images per deployment
   all.sh                 multi-deployment dispatcher with --tag filtering
-  prune.sh               delete old logs
+  prune.sh               delete old logs + metrics files
+  bot.sh / bot.py        Telegram bot — management CLI + Python daemon
 containers/
   template/              `nelly init` copies this; reference config + Dockerfile
   <name>/                a real deployment (gitignored)
+    def/
+      config.json        source of truth
+      .env               global secrets (mode 0600, --env-file mounted)
+      secrets/<app>.env  per-app secrets (mode 0600, bind-mounted read-only)
+      releases/r-NNNN/   per-release: manifest + config + lockfile + logs
+bot/                     per-host bot state (gitignored): .token, config.json, bot.log
 tests/
-  smoke.sh               offline checks: 50+ assertions; runs without Docker
+  smoke.sh               offline: 122 assertions; runs in ~5 s; no Docker
+  e2e.sh                 full pipeline with real Docker; skips cleanly if absent
+.github/workflows/test.yml   smoke + e2e in CI
 ```
 
 **Why bash?** This is glue around `docker`, `git`, and `jq`. Bash keeps the
@@ -921,6 +968,14 @@ command. They are the protections an untrusted config has to defeat:
   argument terminator as defense-in-depth.
 - **Tags, image names, container names, package names** are all anchored
   to their respective POSIX-safe character classes.
+- **`base_image` must not start with `-`** (would otherwise inject an
+  argument into `docker pull`). Pinning a digest (`image@sha256:…`) is
+  encouraged — `nelly doctor` warns if you haven't pinned one.
+- **Secrets keys are restricted to `^[A-Za-z_][A-Za-z0-9_]*$`**; values
+  are escaped on write; files are created with mode 0600 and that mode is
+  re-asserted on every write. Per-app secrets are bind-mounted read-only
+  and sourced only by the matching app's cron invocation — they do not
+  pollute the environment of other apps in the same container.
 
 If you genuinely need to escape one of the path deny-lists (e.g. a
 read-only mount of `/etc/letsencrypt/live`), set the corresponding
@@ -1015,16 +1070,29 @@ prefer it for raw edits. If you've already saved a broken version, run
 ## Development
 
 ```sh
-bash tests/smoke.sh              # offline tests — no Docker required
+bash tests/smoke.sh              # offline: 122 assertions; ~5 s; no Docker
+bash tests/e2e.sh                # full pipeline with real Docker; ~3-5 min
 shellcheck bin/nelly lib/*.sh    # optional but encouraged
+python3 -m py_compile lib/bot.py # validates the bot script
 ```
 
-The smoke suite (`tests/smoke.sh`) covers: bash syntax, intro/help/version
+The **smoke suite** (`tests/smoke.sh`) covers: bash syntax, intro/help/version
 rendering, `init -y → validate`, the full `nelly app …` subcommand surface,
-secrets file mode + round-trip, invalid-config rejection (atomic rollback),
-`explain`, `doctor`, `cron`, `plan`, `tag` add/remove/list, `export → import`
-round-trip, `clone`, `backup → restore` round-trip, `all --tag` filtering,
-and `--json` output. ~50 assertions; runs in ~5 seconds.
+secrets file mode + round-trip (global + per-app), invalid-config rejection
+(atomic rollback), `explain`, `doctor`, `cron`, `plan`, `tag` add/remove/list,
+`export → import` round-trip, `clone`, `backup → restore` round-trip
+(secret-aware), `all --tag` filtering, `release` create/finalize/list/show/
+diff/restore/prune, `metrics` aggregation, `base_image` validation,
+`image-prune` dispatch, and `--json` output. 122 assertions.
+
+The **e2e suite** (`tests/e2e.sh`) builds a real Docker image with a tiny
+local source, runs cron, verifies metrics appear, exercises per-app secrets
+isolation, deploys twice + checks image-prune kept the right images, calls
+`release restore`, exercises `stop`/`start`. Skips cleanly with exit 0 if
+Docker isn't available.
+
+Both run in CI: `.github/workflows/test.yml` runs `smoke` on every push +
+PR and `e2e` on Ubuntu runners (Docker preinstalled).
 
 Each library script is invokable standalone (`bash lib/<x>.sh args…`),
 which makes debugging much cleaner than bisecting through the dispatcher.
