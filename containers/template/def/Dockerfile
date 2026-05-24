@@ -6,9 +6,12 @@ ENV PROJECT_NAME=$PROJECT_NAME \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
-# Base image deps: cron + tini for a clean PID 1.
+# Base image deps: cron + tini for a clean PID 1, procps so the default
+# healthcheck (`pgrep -x cron`) and the `nelly top` / `nelly shell` debugging
+# tools work. `python:*-slim` images strip procps; adding it back here is
+# a few hundred KB but indispensable.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends cron tini ca-certificates \
+ && apt-get install -y --no-install-recommends cron tini ca-certificates procps \
  && rm -rf /var/lib/apt/lists/*
 
 # Extra OS packages declared in config.packages[] are injected here at build time.
