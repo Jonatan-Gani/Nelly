@@ -135,18 +135,43 @@ cp    "$CRONTAB"  "$STAGE/crontab"
 cat > "$STAGE/nelly-run" <<'NELLY_RUN_EOF'
 #!/bin/bash
 # nelly-run <app_name> <entrypoint_relpath>
+#
+# Runs the app's venv python with per-app secrets sourced in. Captures rc +
+# duration to /var/log/nelly/<app>.metrics.jsonl. Rotates the log + metrics
+# files when they exceed 10 MB (one .1 backup kept).
 set +e
 app="$1"; entry="$2"
 log="/var/log/nelly/$app.log"
 metrics="/var/log/nelly/$app.metrics.jsonl"
+secrets_file="/etc/nelly/secrets/$app.env"
 mkdir -p /var/log/nelly
+
+# Rotate either file when it crosses 10 MB. Keep one previous generation.
+MAX_BYTES="${NELLY_LOG_MAX_BYTES:-10485760}"
+for f in "$log" "$metrics"; do
+    if [ -f "$f" ]; then
+        size="$(stat -c %s "$f" 2>/dev/null || echo 0)"
+        if [ "$size" -gt "$MAX_BYTES" ]; then
+            mv -f "$f" "$f.1" 2>/dev/null || true
+        fi
+    fi
+done
+
+# Per-app secrets — sourced after global env-file so they take precedence.
+# Files are bind-mounted read-only from the host's def/secrets/.
+if [ -f "$secrets_file" ]; then
+    set -a
+    # shellcheck disable=SC1090
+    . "$secrets_file"
+    set +a
+fi
+
 ts_iso="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 ts_start="$(date +%s)"
 "/opt/venvs/$app/bin/python" "/home/apps/$app/$entry" >> "$log" 2>&1
 rc=$?
 ts_end="$(date +%s)"
 dur=$(( ts_end - ts_start ))
-# Escape any literal " or \ in app (defensive — validate_config rules them out)
 printf '{"ts":"%s","app":"%s","rc":%d,"duration_s":%d}\n' \
     "$ts_iso" "$app" "$rc" "$dur" >> "$metrics"
 exit $rc
@@ -159,11 +184,29 @@ awk -v pkgs="$(cat "$PKG_FRAG")" -v reqs="$(cat "$REQS_FRAG")" '
     { print }
 ' "$DOCKERFILE_SRC" > "$STAGE/Dockerfile"
 
+# Substitute the base image with a config-pinned digest if provided. Pinning
+# to a sha256 digest is the only way to get truly reproducible builds — the
+# tag `python:3.11-slim` is mutable and what it resolves to changes over
+# time. `nelly base-image-pin <name>` writes a fresh digest into config.
+BASE_IMAGE="$(jqget "$CONFIG" '.base_image' '')"
+if [[ -n "$BASE_IMAGE" ]]; then
+    # Defense-in-depth: validate_config already rejects bad values.
+    case "$BASE_IMAGE" in -*) die "base_image must not start with '-' (got: $BASE_IMAGE)";; esac
+    info "pinning base image: $BASE_IMAGE"
+    # Replace the first `FROM ...` line. Use awk to avoid sed-vs-special-char fights.
+    awk -v img="$BASE_IMAGE" '
+        !replaced && /^FROM / { print "FROM " img; replaced=1; next }
+        { print }
+    ' "$STAGE/Dockerfile" > "$STAGE/Dockerfile.new"
+    mv "$STAGE/Dockerfile.new" "$STAGE/Dockerfile"
+fi
+
 # Install nelly-run regardless of whether the Dockerfile template had a
 # placeholder for it — keeps older per-deployment templates working.
 cat >> "$STAGE/Dockerfile" <<'DOCKERFILE_TAIL'
 
-# Nelly run-wrapper for per-invocation metrics (appended by lib/build.sh).
+# Nelly run-wrapper for per-invocation metrics + per-app secret sourcing
+# (appended by lib/build.sh).
 COPY nelly-run /usr/local/bin/nelly-run
 RUN  chmod +x  /usr/local/bin/nelly-run
 DOCKERFILE_TAIL

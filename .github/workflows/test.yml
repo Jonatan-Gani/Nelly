@@ -1,0 +1,49 @@
+name: tests
+
+on:
+  push:
+    branches: [main, claude/**]
+  pull_request:
+    branches: [main]
+
+jobs:
+  smoke:
+    name: smoke (offline, no docker)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install host deps
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends jq rsync
+          # shellcheck is on the runner already; bash too
+
+      - name: shellcheck (warning+)
+        run: |
+          shellcheck -x -S warning bin/nelly lib/*.sh tests/*.sh
+
+      - name: python syntax check (bot.py)
+        run: python3 -m py_compile lib/bot.py
+
+      - name: run smoke suite
+        run: bash tests/smoke.sh
+
+  e2e:
+    name: end-to-end (real docker)
+    runs-on: ubuntu-latest
+    # Docker is preinstalled on ubuntu-latest runners.
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install host deps
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends jq rsync
+
+      - name: verify docker is running
+        run: docker info
+
+      - name: run e2e suite
+        run: bash tests/e2e.sh
+        timeout-minutes: 10

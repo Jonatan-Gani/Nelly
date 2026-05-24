@@ -88,13 +88,81 @@ for app in "${APPS[@]}"; do
     fi
 done
 
-# ---- 5. secrets referenced by config but missing in .env -------------------
+# ---- 5. secrets file modes + presence --------------------------------------
 
 if [[ -f "$ENV_FILE" ]]; then
     n_keys="$(awk -F= '/^[A-Za-z_][A-Za-z0-9_]*=/' "$ENV_FILE" | wc -l | tr -d ' ')"
-    ok ".env present ($n_keys key(s), mode $(stat -c %a "$ENV_FILE"))"
+    mode="$(stat -c %a "$ENV_FILE")"
+    if [[ "$mode" == "600" ]]; then
+        ok "global secrets file present ($n_keys key(s), mode 0600)"
+    else
+        bad "global secrets file mode is $mode, not 0600 ($ENV_FILE)"
+    fi
 else
-    warn_ "no def/.env — if your apps need secrets, run: nelly secrets set $name KEY=value"
+    warn_ "no def/.env — if your apps need shared secrets, run: nelly secrets set $name KEY=value"
+fi
+
+# Per-app secrets
+if [[ -d "$DEPLOY_DIR/def/secrets" ]]; then
+    for f in "$DEPLOY_DIR/def/secrets"/*.env; do
+        [[ -f "$f" ]] || continue
+        app="$(basename "$f" .env)"
+        m="$(stat -c %a "$f")"
+        if [[ "$m" == "600" ]]; then
+            ok "per-app secrets for '$app' present (mode 0600)"
+        else
+            bad "secrets file for '$app' mode is $m, not 0600 ($f)"
+        fi
+    done
+fi
+
+# ---- 5b. base image pinning ------------------------------------------------
+
+base_img="$(jqget "$CONFIG" '.base_image' '')"
+if [[ -n "$base_img" ]]; then
+    if [[ "$base_img" == *@sha256:* ]]; then
+        ok "base image pinned to a digest ($base_img)"
+    else
+        warn_ "base image is set but not pinned to a sha256 digest — run: nelly base-image-pin $name"
+    fi
+else
+    warn_ "no base_image pinned in config — builds may not be reproducible across time"
+fi
+
+# ---- 5c. requirements pinning for each app --------------------------------
+
+for app in "${APPS[@]}"; do
+    aname="$(echo "$app" | jq -r '.app_name')"
+    req="$DEPLOY_DIR/apps/$aname/requirements.txt"
+    [[ -f "$req" ]] || continue
+    # An unpinned requirement looks like `requests` or `requests>=2`; pinned
+    # looks like `requests==2.31.0`. Warn if any non-comment line lacks `==`.
+    if grep -Ev '^\s*(#|$)' "$req" | grep -v '==' >/dev/null 2>&1; then
+        warn_ "$aname/requirements.txt has unpinned packages (no '==')"
+    else
+        ok "$aname/requirements.txt: all pinned (==)"
+    fi
+done
+
+# ---- 5d. docker disk usage -------------------------------------------------
+
+if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+    total_mb="$(docker system df --format '{{.Size}}' 2>/dev/null | head -1 || true)"
+    img_count="$(docker images "$(jqget "$CONFIG" '.image_name')" -q 2>/dev/null | wc -l | tr -d ' ')"
+    ok "this deployment has $img_count Docker image(s) on disk"
+fi
+
+# ---- 5e. bot config (if any) ------------------------------------------------
+
+if [[ -f "$NELLY_ROOT/bot/config.json" ]]; then
+    bot_cfg_mode="$(stat -c %a "$NELLY_ROOT/bot/config.json")"
+    [[ "$bot_cfg_mode" == "600" ]] && ok "bot/config.json mode 0600" || bad "bot/config.json mode $bot_cfg_mode"
+    if [[ -f "$NELLY_ROOT/bot/.token" ]]; then
+        token_mode="$(stat -c %a "$NELLY_ROOT/bot/.token")"
+        [[ "$token_mode" == "600" ]] && ok "bot/.token mode 0600" || bad "bot/.token mode $token_mode"
+    fi
+    n_users="$(jq -r '.allowed_users | length' "$NELLY_ROOT/bot/config.json")"
+    (( n_users > 0 )) && ok "bot has $n_users allowed user(s)" || warn_ "bot has no allowed users"
 fi
 
 # ---- 6. docker available ---------------------------------------------------

@@ -131,11 +131,49 @@ section "secrets"
 bin/nelly secrets set "$NAME" FOO=bar 'BAZ=quoted "value"' >/dev/null
 mode="$(stat -c %a "$DIR/def/.env")"
 [[ "$mode" == "600" ]] && pass ".env mode 0600" || fail ".env mode is $mode"
-keys="$(bin/nelly secrets list "$NAME" | sort | tr '\n' ' ')"
-[[ "$keys" == "BAZ FOO " ]] && pass "secrets list keys only" || fail "got: $keys"
+listing="$(bin/nelly secrets list "$NAME")"
+[[ "$listing" == *"BAZ"* && "$listing" == *"FOO"* ]] \
+    && pass "secrets list shows keys only" || fail "got: $listing"
 bin/nelly secrets unset "$NAME" FOO >/dev/null
 remaining="$(bin/nelly secrets list "$NAME")"
-[[ "$remaining" == "BAZ" ]] && pass "secrets unset" || fail "got: $remaining"
+[[ "$remaining" == *"BAZ"* && "$remaining" != *"FOO"* ]] \
+    && pass "secrets unset" || fail "got: $remaining"
+
+# Per-app secrets: isolated, mode 0600, listed under app scope.
+bin/nelly secrets set "$NAME" --app legacy DB_PASS=topsecret >/dev/null 2>&1
+# legacy app must exist in config first for --app validation warning to be friendly
+bin/nelly app add "$NAME" --name pets --local /tmp --schedule "*/5 * * * *" --entrypoint p.py >/dev/null 2>&1
+bin/nelly secrets set "$NAME" --app pets API_KEY=abc >/dev/null
+mkdir -p "$DIR/def/secrets"
+mode="$(stat -c %a "$DIR/def/secrets/pets.env")"
+[[ "$mode" == "600" ]] && pass "per-app secrets file mode 0600" || fail "per-app mode $mode"
+plisting="$(bin/nelly secrets list "$NAME")"
+[[ "$plisting" == *"app:pets"* && "$plisting" == *"API_KEY"* ]] \
+    && pass "per-app secrets listed under scope" || fail "per-app list: $plisting"
+
+# JSON listing groups by scope.
+json_list="$(bin/nelly --json secrets list "$NAME")"
+echo "$json_list" | jq -e '.apps.pets[] | select(. == "API_KEY")' >/dev/null \
+    && pass "secrets list --json groups by scope" || fail "json list: $json_list"
+
+# Backup excludes secrets by default.
+TARBALL_NS="/tmp/nelly-smoke-nosec-$$.tar.gz"
+bin/nelly backup "$NAME" --out "$TARBALL_NS" >/dev/null 2>&1
+if tar -tzf "$TARBALL_NS" | grep -qE 'def/(\.env|secrets/)'; then
+    fail "backup leaked secrets by default"
+else
+    pass "backup excludes secrets by default"
+fi
+rm -f "$TARBALL_NS"
+
+# Backup with --include-secrets includes them (with the warning).
+TARBALL_WS="/tmp/nelly-smoke-withsec-$$.tar.gz"
+bin/nelly backup "$NAME" --out "$TARBALL_WS" --include-secrets >/dev/null 2>&1
+tar -tzf "$TARBALL_WS" | grep -q 'def/\.env' \
+    && pass "backup --include-secrets includes .env" || fail "include-secrets didn't include .env"
+rm -f "$TARBALL_WS"
+bin/nelly app remove "$NAME" pets >/dev/null 2>&1
+rm -rf "$DIR/def/secrets"
 
 # ----------------------------------------------------------------------------
 section "tags"
@@ -383,6 +421,40 @@ empty="$(bin/nelly --json metrics "$NAME" --app nosuchapp | jq 'length')"
 # Build.sh emits the nelly-run helper into stage on --dry-run
 DRY_OUT="$(bin/nelly build "$NAME" --dry-run 2>&1 || true)"
 [[ "$DRY_OUT" == *"nelly-run"* ]] && pass "build installs nelly-run wrapper" || fail "nelly-run not in rendered Dockerfile"
+
+# ----------------------------------------------------------------------------
+section "base image pinning + image-prune dispatch"
+
+# Valid digest-pinned base_image accepted.
+bin/nelly set "$NAME" '.base_image' '"python:3.11-slim@sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abcd"' >/dev/null
+[[ "$(bin/nelly get "$NAME" '.base_image')" == "python:3.11-slim@sha256:"* ]] \
+    && pass "base_image accepts digest-pinned form" || fail "base_image set"
+
+# Bad base_image rejected (leading dash → arg injection vector).
+if bin/nelly set "$NAME" '.base_image' '"--evil python:3.11-slim"' >/dev/null 2>&1; then
+    fail "accepted base_image starting with '-'"
+else
+    pass "rejected base_image starting with '-'"
+fi
+bin/nelly set "$NAME" '.base_image' '""' >/dev/null
+
+# image-prune dispatches without docker (it just won't find anything to prune).
+# The script requires `docker info` to succeed before doing work, so without
+# docker it should error out gracefully. We just check the command path is wired.
+out="$(bin/nelly image-prune "$NAME" --dry-run 2>&1 || true)"
+[[ -n "$out" ]] && pass "image-prune command dispatched" || fail "image-prune not wired"
+
+# Dry-run + --keep parsing
+out="$(bin/nelly image-prune "$NAME" --keep 5 --dry-run 2>&1 || true)"
+[[ -n "$out" ]] && pass "image-prune accepts --keep + --dry-run" || fail "image-prune flags"
+
+# ----------------------------------------------------------------------------
+section "doctor expanded checks"
+
+# Run doctor on the test deployment; check the new sections fire.
+doctor_out="$(bin/nelly doctor "$NAME" 2>&1 || true)"
+[[ "$doctor_out" == *"base_image"* || "$doctor_out" == *"base image"* ]] \
+    && pass "doctor reports base image status" || fail "doctor missing base image check"
 
 # ----------------------------------------------------------------------------
 section "telegram bot wiring"

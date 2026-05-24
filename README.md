@@ -575,6 +575,105 @@ rather than guess.
 
 ---
 
+## Production hardening (v0.5+)
+
+Nelly is built for one trusted operator on one host. These knobs make
+that single-host setup actually bulletproof:
+
+### Per-app secret isolation
+
+Secrets live in two scopes:
+
+```
+def/.env                   # deployment-wide, visible to every cron job in the container
+def/secrets/<app>.env      # per-app, only sourced by that app's cron invocation
+```
+
+```sh
+nelly secrets set <name>             KEY=value     # global
+nelly secrets set <name> --app foo   KEY=value     # only 'foo' sees this
+nelly secrets list <name>                          # grouped: global + per-app
+nelly secrets list <name> --app foo                # one scope only
+nelly secrets unset <name> --app foo KEY
+nelly secrets edit  <name> [--app foo]
+```
+
+Mechanism: deployment-wide vars come via `docker run --env-file` (set once at
+container start). Per-app vars live in `def/secrets/<app>.env`, bind-mounted
+read-only to `/etc/nelly/secrets/`, and the `nelly-run` wrapper sources only
+the matching file before exec'ing python. Different apps in the same
+container therefore don't see each other's env vars at runtime. (Other apps
+*could* still read the files if they actively try — for full isolation, run
+one app per deployment.)
+
+### Reproducible base image
+
+Pin the OS base layer to a sha256 digest so two builds months apart produce
+the same image:
+
+```sh
+nelly base-image-pin <name>                   # current default (python:3.11-slim) → digest
+nelly base-image-pin <name> python:3.12-slim  # pick a different tag, resolve its digest
+```
+
+`nelly doctor` warns if `base_image` isn't pinned, and if any app's
+`requirements.txt` has unpinned packages (no `==`).
+
+### Bounded disk usage — `nelly image-prune`
+
+Every successful `nelly deploy` automatically prunes old Docker images for
+that deployment. Defaults: keep the **last 2 successful** images plus
+`:latest` plus the currently-running one. Everything else gets
+`docker image rm`'d.
+
+The release manifests (`def/releases/r-NNNN/manifest.json` + `config.json`
++ `commits.lock.json` + logs) stay on disk forever (up to retention), so
+you can always **rebuild** a prior release from source even after its
+image has been pruned. The image is a cache; the release is the truth.
+
+```sh
+nelly image-prune <name>                  # keep last 2 + :latest + running
+nelly image-prune <name> --keep 5
+nelly image-prune <name> --dry-run        # show what would be removed
+```
+
+### Backups are secret-aware
+
+`nelly backup <name>` excludes `def/.env` and `def/secrets/` by default.
+Pass `--include-secrets` to opt in (loud warning). Restore is unchanged —
+secrets that are in the tarball get restored at mode 0600.
+
+### In-container log rotation
+
+The `nelly-run` wrapper rotates `<app>.log` and `<app>.metrics.jsonl` when
+they exceed 10 MB (configurable via the `NELLY_LOG_MAX_BYTES` env var),
+keeping one `.1` generation. So even if `nelly prune` hasn't run yet, the
+in-container log files can't fill the disk on their own.
+
+### Pre-flight check (`nelly doctor`) now covers
+
+- Config validation
+- Source reachability (git ls-remote / local path exists)
+- Entrypoint exists in fetched apps
+- Docker is running
+- Host tools installed
+- Global + per-app secrets files have mode 0600
+- Base image is pinned to a sha256 digest
+- Each app's `requirements.txt` uses `==` pinning
+- Docker image count for this deployment
+- Bot config + token modes (if bot is set up)
+
+### Tests
+
+- `tests/smoke.sh` — 122 offline assertions, runs in ~5 s, no Docker.
+  Run on every push via `.github/workflows/test.yml`.
+- `tests/e2e.sh` — full pipeline with real Docker: builds the image, runs
+  cron, verifies metrics appear, deploys twice + checks image-prune, calls
+  `release restore`, exercises start/stop. Skips cleanly when Docker
+  isn't available. Runs on `main` and on Claude branches.
+
+---
+
 ## Releases & metrics (version control for what's deployed)
 
 Every `nelly deploy` produces a **release record** — a tracked, revertable

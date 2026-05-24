@@ -37,10 +37,12 @@ case "$sub" in
 
         OUT=""
         INCLUDE_LOGS=0
+        INCLUDE_SECRETS=0
         while (( $# > 0 )); do
             case "$1" in
-                --out)          OUT="$2"; shift 2 ;;
-                --include-logs) INCLUDE_LOGS=1; shift ;;
+                --out)             OUT="$2"; shift 2 ;;
+                --include-logs)    INCLUDE_LOGS=1; shift ;;
+                --include-secrets) INCLUDE_SECRETS=1; shift ;;
                 *) die "unknown flag: $1" ;;
             esac
         done
@@ -49,14 +51,21 @@ case "$sub" in
         ts="$(date -u +%Y%m%d-%H%M%S)"
         [[ -z "$OUT" ]] && OUT="${name}-${ts}.tar.gz"
 
-        # Build the file list. We exclude apps/ (will be re-fetched), .build/
-        # (transient), the lock file, and—by default—logs/.
+        # Build the file list. apps/ is excluded (will be re-fetched), .build/
+        # is transient, the lockfile too. Secrets and logs are excluded by
+        # default — secrets to keep them from sprawling, logs because they'd
+        # bloat the tarball.
         declare -a EXCLUDES=(
             --exclude='apps'
             --exclude='.build'
             --exclude='.nelly.lock'
         )
         (( INCLUDE_LOGS )) || EXCLUDES+=(--exclude='logs')
+        if (( INCLUDE_SECRETS )); then
+            warn "including secrets in backup — handle this file like a password (mode 0600 on disk; do NOT commit it anywhere)"
+        else
+            EXCLUDES+=(--exclude='def/.env' --exclude='def/secrets')
+        fi
 
         info "writing backup → $OUT"
         # Use tar's -C to make paths relative; resulting tarball restores to <name>/...

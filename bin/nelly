@@ -5,7 +5,7 @@
 
 set -euo pipefail
 
-NELLY_VERSION="0.4.0"
+NELLY_VERSION="0.5.0"
 
 NELLY_ROOT="$(cd "$(dirname "$(realpath "$0")")/.." && pwd)"
 export NELLY_ROOT
@@ -105,12 +105,12 @@ $(_bold "MANAGE CONFIG")  $(_dim "(config.json is the source of truth)")
   validate   <name>
   tag        <name> add|remove|list TAG...
 
-$(_bold "MANAGE SECRETS")  $(_dim "(def/.env, mode 0600, mounted at runtime)")
-  secrets set      <name> KEY=value [...]
-  secrets unset    <name> KEY [...]
-  secrets list     <name>                    keys only
-  secrets edit     <name>
-  secrets template <name>
+$(_bold "MANAGE SECRETS")  $(_dim "(def/.env global + def/secrets/<app>.env per-app, all mode 0600)")
+  secrets set      <name> [--app APP] KEY=value [...]
+  secrets unset    <name> [--app APP] KEY [...]
+  secrets list     <name> [--app APP]        keys only — never values
+  secrets edit     <name> [--app APP]
+  secrets template <name>                    skeleton from legacy config refs
 
 $(_bold "LIFECYCLE")
   start      <name>                     docker start
@@ -143,6 +143,15 @@ $(_bold "RELEASES")  $(_dim "(every deploy is a tracked, revertable record)")
                                                  Revert config + image atomically
   release note     <name> <rel_id> "<text>"     Annotate a release
   release prune    <name> [--keep N]            Trim retention (default 50)
+
+$(_bold "IMAGE MANAGEMENT")  $(_dim "(disk hygiene + reproducible bases)")
+  image-prune     <name> [--keep N] [--dry-run]
+                                                 Remove old Docker images for this deployment.
+                                                 Always keeps :latest + running + last N
+                                                 successful (default N=2). Auto-runs on
+                                                 successful deploy.
+  base-image-pin  <name> [<image:tag>]          Resolve a tag to its current @sha256:... and
+                                                 write to .base_image (reproducible base).
 
 $(_bold "SHARE / MIGRATE / BACK UP")
   export     <name> [--include-secrets] [--include-lockfile]
@@ -470,6 +479,9 @@ _run_deploy() {
                 ${wait_seconds:+--wait-healthy $wait_seconds}
             '$LIB/hooks.sh' '$d' post_deploy || true
             '$LIB/prune.sh' '$d' || true
+            # Auto-prune old Docker images so disk doesn't grow without bound.
+            # Keeps the last N successful images (default 2) + :latest + running.
+            '$LIB/image-prune.sh' '$d' || true
         else
             rc=\$?
             trap - ERR
@@ -635,6 +647,43 @@ case "$cmd" in
     metrics)
         d="$(_deploy_dir "${1:-}")"; shift || true
         "$LIB/metrics.sh" "$d" "$@" ;;
+
+    # ---- image management ---------------------------------------------
+    image-prune)
+        d="$(_deploy_dir "${1:-}")"; shift || true
+        "$LIB/image-prune.sh" "$d" "$@" ;;
+
+    base-image-pin)
+        # nelly base-image-pin <name> [<image:tag>]
+        # Resolves the (optionally-named) image to its current sha256 digest
+        # and writes it to .base_image in the config. Use this whenever you
+        # consciously want to refresh the OS base layer.
+        d="$(_deploy_dir "${1:-}")"; shift || true
+        TAG="${1:-}"
+        if [[ -z "$TAG" ]]; then
+            # Try to read the existing tag (without digest) from config; else
+            # fall back to the Dockerfile's FROM line; else python:3.11-slim.
+            TAG="$("$LIB/config.sh" get "$d" '.base_image' 2>/dev/null | sed 's/@sha256:.*//' || true)"
+            [[ -z "$TAG" || "$TAG" == "null" ]] \
+                && TAG="$(awk 'NR==1 && /^FROM / {print $2; exit}' "$d/def/Dockerfile" 2>/dev/null || echo python:3.11-slim)"
+        fi
+        require_cmd docker
+        info "pulling $TAG to read its digest"
+        docker pull -q -- "$TAG" >/dev/null
+        # RepoDigests looks like ["python@sha256:abc..."]. Extract the digest part.
+        DIG="$(docker inspect "$TAG" --format '{{index .RepoDigests 0}}' 2>/dev/null || true)"
+        [[ -n "$DIG" && "$DIG" == *@sha256:* ]] || die "could not resolve digest for $TAG"
+        PINNED="${TAG%%:*}:${TAG##*:}@${DIG##*@}"
+        # If TAG had no `:` (e.g. just "python"), TAG%%:* == TAG and TAG##:* == TAG, producing TAG:TAG@...
+        # In that case fall back to the form digest_repo@digest.
+        case "$TAG" in
+            *:*)  : ;;
+            *)    PINNED="${TAG}@${DIG##*@}" ;;
+        esac
+        "$LIB/config.sh" set "$d" '.base_image' "$PINNED" >/dev/null
+        info "pinned base image: $PINNED"
+        info "next deploy will rebuild from this exact digest"
+        ;;
 
     # ---- Telegram bot --------------------------------------------------
     bot)

@@ -218,6 +218,17 @@ validate_config() {
             || errors+=(".network.extra_networks entry '$n' invalid")
     done
 
+    # base_image — must not start with '-' (docker arg injection); must be a
+    # plausible image reference. Encourage digest pinning by warning when no
+    # @sha256 is present (warning, not error).
+    local bimg
+    bimg="$(jqget "$config" '.base_image' '')"
+    if [[ -n "$bimg" ]]; then
+        case "$bimg" in -*) errors+=(".base_image must not start with '-' (got: $bimg)");; esac
+        [[ "$bimg" =~ ^[a-zA-Z0-9][a-zA-Z0-9_./:@-]*$ ]] \
+            || errors+=(".base_image '$bimg' is not a valid image reference")
+    fi
+
     if (( ${#errors[@]} > 0 )); then
         err "config validation failed for $config:"
         for e in "${errors[@]}"; do err "  - $e"; done

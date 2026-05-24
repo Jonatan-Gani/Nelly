@@ -148,11 +148,22 @@ for p in "${PORTS[@]}"; do
     DOCKER_ARGS+=(-p "$p")
 done
 
-# Secrets (env-file)
+# Deployment-wide secrets via --env-file (visible to all apps inside the container).
 if [[ -f "$ENV_FILE" ]]; then
     DOCKER_ARGS+=(--env-file "$ENV_FILE")
-else
-    warn "no $ENV_FILE — apps will run without secrets"
+fi
+
+# Per-app secrets — bind-mounted read-only into the container at
+# /etc/nelly/secrets/. `nelly-run` sources only the current app's file at
+# invocation time, so cron jobs for different apps in the same container
+# do NOT share each other's env vars at runtime.
+APP_SECRETS_DIR="$DEPLOY_DIR/def/secrets"
+if [[ -d "$APP_SECRETS_DIR" ]]; then
+    DOCKER_ARGS+=(-v "$APP_SECRETS_DIR:/etc/nelly/secrets:ro")
+fi
+
+if [[ ! -f "$ENV_FILE" && ! -d "$APP_SECRETS_DIR" ]]; then
+    warn "no secrets configured ($ENV_FILE not present, no def/secrets/) — apps will run with no env"
 fi
 
 # Volumes — default cron-logs mount, then any extras from config.
