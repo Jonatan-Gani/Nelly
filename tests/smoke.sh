@@ -304,6 +304,87 @@ bin/nelly doctor "$NAME" >/dev/null 2>&1 || true
 pass "doctor ran"
 
 # ----------------------------------------------------------------------------
+section "releases (deploy version control)"
+# create + finalize a release manually (no real deploy needed)
+REL_OUT="$(bash lib/release.sh create "$DIR")"
+[[ -n "$REL_OUT" && "$REL_OUT" =~ ^r-[0-9]{4}$ ]] \
+    && pass "release create returns id: $REL_OUT" || fail "release create: $REL_OUT"
+REL_ID="$REL_OUT"
+
+# manifest + snapshot files exist
+[[ -f "$DIR/def/releases/$REL_ID/manifest.json" ]] && pass "manifest exists" || fail "no manifest"
+[[ -f "$DIR/def/releases/$REL_ID/config.json"   ]] && pass "config snapshot exists" || fail "no config snapshot"
+
+# pending → success
+bash lib/release.sh finalize "$DIR" "$REL_ID" --outcome success --image "fake:v1" --health "healthy" >/dev/null 2>&1
+outcome="$(jq -r .outcome "$DIR/def/releases/$REL_ID/manifest.json")"
+[[ "$outcome" == "success" ]] && pass "release finalized as success" || fail "outcome: $outcome"
+
+# duration is non-negative integer
+dur="$(jq -r .duration_seconds "$DIR/def/releases/$REL_ID/manifest.json")"
+[[ "$dur" =~ ^[0-9]+$ ]] && pass "duration recorded ($dur s)" || fail "duration: $dur"
+
+# release list includes the id
+list_out="$(bin/nelly release list "$NAME")"
+[[ "$list_out" == *"$REL_ID"* ]] && pass "release list shows $REL_ID" || fail "release list output"
+
+# release show JSON has the manifest
+bin/nelly --json release show "$NAME" "$REL_ID" | jq -e '.image == "fake:v1"' >/dev/null \
+    && pass "release show --json" || fail "release show --json"
+
+# note round-trip
+bin/nelly release note "$NAME" "$REL_ID" "smoketest note" >/dev/null 2>&1
+note="$(bin/nelly --json release show "$NAME" "$REL_ID" | jq -r .note)"
+[[ "$note" == "smoketest note" ]] && pass "release note round-trip" || fail "note: $note"
+
+# create a second release and diff
+REL2="$(bash lib/release.sh create "$DIR")"
+bash lib/release.sh finalize "$DIR" "$REL2" --outcome success --image "fake:v2" >/dev/null 2>&1
+bin/nelly release diff "$NAME" "$REL_ID" "$REL2" >/dev/null 2>&1 \
+    && pass "release diff runs" || fail "release diff"
+
+# prune to keep=1 leaves 1
+bin/nelly release prune "$NAME" --keep 1 >/dev/null 2>&1
+remaining="$(jq '.releases | length' "$DIR/def/releases.index.json")"
+[[ "$remaining" == "1" ]] && pass "release prune --keep 1" || fail "remaining: $remaining"
+
+# ----------------------------------------------------------------------------
+section "metrics (per-app run stats)"
+# Fabricate a small .metrics.jsonl and confirm aggregation works.
+mkdir -p "$DIR/logs/cron"
+M="$DIR/logs/cron/foo.metrics.jsonl"
+NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+{
+    echo '{"ts":"'"$NOW"'","app":"foo","rc":0,"duration_s":10}'
+    echo '{"ts":"'"$NOW"'","app":"foo","rc":0,"duration_s":12}'
+    echo '{"ts":"'"$NOW"'","app":"foo","rc":1,"duration_s":3}'
+} > "$M"
+# Re-add a foo app so metrics has something to attach to.
+bin/nelly app add "$NAME" --name foo --local /tmp --schedule "*/5 * * * *" --entrypoint main.py >/dev/null 2>&1 || true
+
+metrics_json="$(bin/nelly --json metrics "$NAME")"
+runs="$(echo "$metrics_json" | jq -r '.[] | select(.app == "foo") | .runs')"
+ok="$(echo "$metrics_json" | jq -r '.[] | select(.app == "foo") | .success')"
+fail_=$(echo "$metrics_json" | jq -r '.[] | select(.app == "foo") | .failed')
+[[ "$runs" == "3" && "$ok" == "2" && "$fail_" == "1" ]] \
+    && pass "metrics aggregation correct (runs=3 ok=2 fail=1)" \
+    || fail "metrics: runs=$runs ok=$ok fail=$fail_"
+
+# Human output renders
+bin/nelly metrics "$NAME" 2>&1 | grep -q "^foo " \
+    && pass "metrics human output renders" || fail "metrics human output"
+
+# --since filtering: a tiny window before any data should yield zero rows
+empty="$(bin/nelly --json metrics "$NAME" --since 1s 2>/dev/null | jq 'length' 2>/dev/null || echo X)"
+# With ts == NOW, 1s window may still include — instead use --app on a nonexistent app
+empty="$(bin/nelly --json metrics "$NAME" --app nosuchapp | jq 'length')"
+[[ "$empty" == "0" ]] && pass "metrics filter works" || fail "metrics filter: $empty"
+
+# Build.sh emits the nelly-run helper into stage on --dry-run
+DRY_OUT="$(bin/nelly build "$NAME" --dry-run 2>&1 || true)"
+[[ "$DRY_OUT" == *"nelly-run"* ]] && pass "build installs nelly-run wrapper" || fail "nelly-run not in rendered Dockerfile"
+
+# ----------------------------------------------------------------------------
 section "telegram bot wiring"
 # Python module must compile
 if python3 -m py_compile lib/bot.py 2>/dev/null; then

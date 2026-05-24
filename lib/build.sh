@@ -58,7 +58,13 @@ for app in "${APPS[@]}"; do
     name="$(echo "$app"  | jq -r '.app_name')"
     sched="$(echo "$app" | jq -r '.schedule  // empty')"
     entry="$(echo "$app" | jq -r '.entrypoint // empty')"
-    [[ -d "$APPS_DIR/$name" ]] || die "missing fetched app: $name (run: nelly fetch …)"
+    if [[ ! -d "$APPS_DIR/$name" ]]; then
+        if (( DRY_RUN )); then
+            warn "(dry-run) app $name not fetched yet — would normally die here"
+        else
+            die "missing fetched app: $name (run: nelly fetch …)"
+        fi
+    fi
 
     if [[ -z "$sched" || -z "$entry" ]]; then
         warn "app $name has no schedule/entrypoint; installed but not scheduled"
@@ -66,13 +72,13 @@ for app in "${APPS[@]}"; do
     fi
     SCHEDULED=$((SCHEDULED+1))
 
-    # Each cron line runs as root, invokes the app's venv python with an
-    # absolute path entrypoint, and logs to /var/log/nelly/<app>.log (bind
-    # mount). No shell wrapper / no 'cd' is used because the value of
-    # $entry comes from config and is validated to be a relative path with
-    # safe characters only — see lib/config.sh::validate_config.
-    log="/var/log/nelly/$name.log"
-    echo "$sched root /opt/venvs/$name/bin/python /home/apps/$name/$entry >> $log 2>&1" >> "$CRONTAB"
+    # Each cron line invokes /usr/local/bin/nelly-run (baked into the image),
+    # which runs the app's venv python with the entrypoint, captures the exit
+    # code + duration, and appends one JSON line to
+    # /var/log/nelly/<app>.metrics.jsonl (bind-mounted to host's logs/cron/).
+    # Both $name and $entry are validated by lib/config.sh::validate_config
+    # to contain only safe characters.
+    echo "$sched root /usr/local/bin/nelly-run $name $entry" >> "$CRONTAB"
 done
 # /etc/cron.d files MUST end with a newline.
 printf '\n' >> "$CRONTAB"
@@ -114,15 +120,53 @@ fi
 
 STAGE="$BUILD_DIR/ctx"
 rm -rf "$STAGE"
-mkdir -p "$STAGE"
-cp -r "$APPS_DIR" "$STAGE/apps"
+mkdir -p "$STAGE/apps"
+# Copy fetched apps into the stage. With --dry-run the apps dir may be empty
+# (we haven't fetched yet); in that case the stage just gets the empty dir.
+if [[ -d "$APPS_DIR" ]] && compgen -G "$APPS_DIR/*" >/dev/null; then
+    cp -r "$APPS_DIR"/* "$STAGE/apps/"
+fi
 cp    "$CRONTAB"  "$STAGE/crontab"
+
+# nelly-run wrapper: tiny shim that runs the app's venv python and records
+# exit code + duration to /var/log/nelly/<app>.metrics.jsonl. Baked into the
+# image so `nelly metrics` has data to aggregate. Written at build time so
+# existing deployments work without re-scaffolding their template.
+cat > "$STAGE/nelly-run" <<'NELLY_RUN_EOF'
+#!/bin/bash
+# nelly-run <app_name> <entrypoint_relpath>
+set +e
+app="$1"; entry="$2"
+log="/var/log/nelly/$app.log"
+metrics="/var/log/nelly/$app.metrics.jsonl"
+mkdir -p /var/log/nelly
+ts_iso="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+ts_start="$(date +%s)"
+"/opt/venvs/$app/bin/python" "/home/apps/$app/$entry" >> "$log" 2>&1
+rc=$?
+ts_end="$(date +%s)"
+dur=$(( ts_end - ts_start ))
+# Escape any literal " or \ in app (defensive — validate_config rules them out)
+printf '{"ts":"%s","app":"%s","rc":%d,"duration_s":%d}\n' \
+    "$ts_iso" "$app" "$rc" "$dur" >> "$metrics"
+exit $rc
+NELLY_RUN_EOF
+chmod +x "$STAGE/nelly-run"
 
 awk -v pkgs="$(cat "$PKG_FRAG")" -v reqs="$(cat "$REQS_FRAG")" '
     /# NELLY: SYSTEM_PACKAGES/ { print pkgs; next }
     /# NELLY: APP_VENVS/       { print reqs; next }
     { print }
 ' "$DOCKERFILE_SRC" > "$STAGE/Dockerfile"
+
+# Install nelly-run regardless of whether the Dockerfile template had a
+# placeholder for it — keeps older per-deployment templates working.
+cat >> "$STAGE/Dockerfile" <<'DOCKERFILE_TAIL'
+
+# Nelly run-wrapper for per-invocation metrics (appended by lib/build.sh).
+COPY nelly-run /usr/local/bin/nelly-run
+RUN  chmod +x  /usr/local/bin/nelly-run
+DOCKERFILE_TAIL
 
 if (( DRY_RUN )); then
     info "dry-run: rendered Dockerfile follows"

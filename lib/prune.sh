@@ -13,4 +13,4 @@ LOG_DIR="$DEPLOY_DIR/logs"
 [[ -d "$LOG_DIR" ]] || { info "no log dir; nothing to prune"; exit 0; }
 
 info "pruning logs older than $DAYS days in $LOG_DIR"
-find "$LOG_DIR" -type f -name '*.log' -mtime "+$DAYS" -print -delete
+find "$LOG_DIR" -type f \( -name '*.log' -o -name '*.metrics.jsonl' \) -mtime "+$DAYS" -print -delete

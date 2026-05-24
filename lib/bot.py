@@ -174,6 +174,9 @@ def cmd_help(_args: list[str], _allow_writes: bool) -> str:
         "  /explain <name>                plain-English summary",
         "  /doctor <name>                 pre-flight check",
         "  /events <name>                 recent docker events",
+        "  /releases <name>               recent deploy history",
+        "  /release  <name> [rel_id]      release manifest (default: latest)",
+        "  /metrics  <name> [app|since]   per-app run stats",
     ]
     if _allow_writes:
         lines += [
@@ -185,6 +188,7 @@ def cmd_help(_args: list[str], _allow_writes: bool) -> str:
             "  /runnow <name> <app>",
             "  /deploy <name>",
             "  /rollback <name>",
+            "  /release_restore <name> <rel_id>     revert to a release (config+image)",
         ]
     lines += ["", "  /id                            print your Telegram user id"]
     return "\n".join(lines)
@@ -284,6 +288,50 @@ def cmd_events(args: list[str], _aw: bool) -> str:
         return f"docker events failed: {e}"
     return f"```\n{out or '(no events in last hour)'}\n```"
 
+REL_ID_RE = re.compile(r"^r-\d{4,}$")
+
+def cmd_releases(args: list[str], _aw: bool) -> str:
+    n, err = _one_name(args)
+    if err: return err
+    rc, out = run_nelly("release", "list", n)
+    return fmt(rc, out)
+
+def cmd_release(args: list[str], _aw: bool) -> str:
+    n, err = _one_name(args)
+    if err: return err
+    if len(args) >= 2:
+        if not REL_ID_RE.match(args[1]):
+            return f"invalid release id: {args[1]!r}"
+        rc, out = run_nelly("release", "show", n, args[1])
+    else:
+        rc, out = run_nelly("release", "show", n)
+    return fmt(rc, out)
+
+def cmd_metrics(args: list[str], _aw: bool) -> str:
+    n, err = _one_name(args)
+    if err: return err
+    extra: list[str] = []
+    if len(args) >= 2:
+        # second arg may be an app name OR a since string like "24h"
+        if re.match(r"^\d+[smhd]$", args[1]):
+            extra = ["--since", args[1]]
+        else:
+            app = safe_name(args[1])
+            if not app: return f"invalid app/since arg: {args[1]!r}"
+            extra = ["--app", app]
+    rc, out = run_nelly("metrics", n, *extra)
+    return fmt(rc, out)
+
+def cmd_release_restore(args: list[str], _aw: bool) -> str:
+    if len(args) < 2:
+        return "usage: /release_restore <name> <rel_id>"
+    n = safe_name(args[0])
+    if not n: return f"invalid name: {args[0]!r}"
+    if not REL_ID_RE.match(args[1]):
+        return f"invalid release id: {args[1]!r}"
+    rc, out = run_nelly("release", "restore", n, args[1])
+    return fmt(rc, out)
+
 # ---- write commands (only when allow_writes) -------------------------------
 
 def cmd_start_dep(args: list[str], _aw: bool) -> str:
@@ -342,13 +390,17 @@ COMMANDS: dict[str, tuple[Callable, bool]] = {
     "explain":     (cmd_explain,False),
     "doctor":      (cmd_doctor,False),
     "events":      (cmd_events,False),
+    "releases":    (cmd_releases, False),
+    "release":     (cmd_release,  False),
+    "metrics":     (cmd_metrics,  False),
     # writes
-    "start_dep":   (cmd_start_dep,  True),
-    "stop_dep":    (cmd_stop_dep,   True),
-    "restart_dep": (cmd_restart_dep,True),
-    "runnow":      (cmd_runnow,     True),
-    "deploy":      (cmd_deploy,     True),
-    "rollback":    (cmd_rollback,   True),
+    "start_dep":      (cmd_start_dep,    True),
+    "stop_dep":       (cmd_stop_dep,     True),
+    "restart_dep":    (cmd_restart_dep,  True),
+    "runnow":         (cmd_runnow,       True),
+    "deploy":         (cmd_deploy,       True),
+    "rollback":       (cmd_rollback,     True),
+    "release_restore":(cmd_release_restore, True),
 }
 
 # ---------------------------------------------------------------------------

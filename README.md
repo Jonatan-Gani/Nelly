@@ -575,6 +575,106 @@ rather than guess.
 
 ---
 
+## Releases & metrics (version control for what's deployed)
+
+Every `nelly deploy` produces a **release record** — a tracked, revertable
+snapshot of exactly what shipped: image tag, full config, commit pins per
+app, outcome (success/failed/rolled_back), duration, health status, who
+ran it. Releases let you roll back code *and* configuration as one atomic
+change, not just the docker image.
+
+Every cron invocation inside the container also logs **run metrics**
+(timestamp, exit code, duration) via a tiny `nelly-run` wrapper baked
+into the image. `nelly metrics` aggregates them per app, or per release.
+
+### Releases
+
+```sh
+nelly release list   scraper                  # recent deploys (ID, when, outcome, image)
+nelly release show   scraper                  # latest release manifest
+nelly release show   scraper r-0042           # a specific one
+nelly release diff   scraper r-0040 r-0042    # unified config diff between two
+nelly release note   scraper r-0042 "v1.4 cutover"
+
+# Revert config + image atomically. Writes a NEW release recording the rollback.
+nelly release restore scraper r-0040
+
+# Or partial:
+nelly release restore scraper r-0040 --image-only     # keep current config
+nelly release restore scraper r-0040 --config-only    # keep current image
+
+# Retention (auto-pruned to last 50 by default):
+nelly release prune scraper --keep 100
+```
+
+Storage: `containers/<name>/def/releases/<rel_id>/`
+- `manifest.json` — full record (see schema below)
+- `config.json`, `commits.lock.json` — snapshots at deploy time
+- `build.log`, `run.log` — copied from the deploy run
+
+### Metrics
+
+```sh
+nelly metrics scraper                         # all-time, all apps
+nelly metrics scraper --since 24h             # last day
+nelly metrics scraper --app fetcher           # one app
+nelly metrics scraper --release r-0042        # one release's time window
+nelly metrics scraper --json                  # machine-readable
+```
+
+Output:
+```
+APP                RUNS     OK   FAIL   AVG(s)   P95(s)                  LAST   RC
+fetcher             288    285      3       12       30  2026-05-14T12:30:00Z    0
+digest               24     24      0        1        2  2026-05-14T08:00:00Z    0
+```
+
+### Release manifest schema
+
+```jsonc
+{
+  "release_id":              "r-0042",
+  "deployment":              "scraper",
+  "created_at":              "2026-05-14T12:30:01Z",
+  "finalized_at":            "2026-05-14T12:31:17Z",
+  "duration_seconds":        76,
+  "outcome":                 "success",          // success | failed | rolled_back | pending
+  "image":                   "scraper:abc123def456",
+  "actor":                   "me@scraper-host",
+  "config_hash":             "sha256:…",
+  "previous_release_id":     "r-0041",
+  "rollback_of":             null,               // set when restore created this release
+  "health_status":           "healthy",
+  "wait_healthy_seconds":    60,
+  "auto_rollback_triggered": false,
+  "note":                    "v1.4 cutover"
+}
+```
+
+### From Telegram
+
+```
+/releases <name>             — table of recent releases
+/release  <name> [rel_id]    — full manifest
+/metrics  <name> [app|since] — per-app stats (e.g. /metrics scraper 24h)
+/release_restore <name> <rel_id>   — revert (requires allow_writes:true)
+```
+
+### Recipes
+
+```sh
+# How did the last release perform?
+nelly metrics scraper --release "$(nelly --json release show scraper | jq -r .release_id)"
+
+# Roll back to whatever was running before
+nelly release restore scraper "$(nelly --json release show scraper | jq -r .previous_release_id)"
+
+# Add a note to the release that just shipped
+nelly release note scraper r-0042 "Hotfix for the digest timezone bug"
+```
+
+---
+
 ## Telegram bot (optional, secure remote monitoring)
 
 If you want to check on your deployments from your phone — and optionally

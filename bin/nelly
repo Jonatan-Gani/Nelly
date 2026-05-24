@@ -131,7 +131,18 @@ $(_bold "OBSERVE")
   logs       <name> [app]               Tail container logs
   events     <name> [--since DUR]       Stream docker events for the container
   cron       <name> [--next N]          What's scheduled, in human terms
+  metrics    <name> [--app A] [--since DUR] [--release REL]
+                                         Per-app run metrics (count, success, p95)
   prune      <name>                     Delete old log files
+
+$(_bold "RELEASES")  $(_dim "(every deploy is a tracked, revertable record)")
+  release list     <name>                       Recent releases
+  release show     <name> [rel_id]              Manifest (default: latest)
+  release diff     <name> <rel_a> <rel_b>       Config diff between two releases
+  release restore  <name> <rel_id> [--image-only|--config-only]
+                                                 Revert config + image atomically
+  release note     <name> <rel_id> "<text>"     Annotate a release
+  release prune    <name> [--keep N]            Trim retention (default 50)
 
 $(_bold "SHARE / MIGRATE / BACK UP")
   export     <name> [--include-secrets] [--include-lockfile]
@@ -328,6 +339,49 @@ allow_writes:true in bot/config.json, every command is audit-logged to
 bot/bot.log.
 EOF
             ;;
+        release|releases) cat <<EOF
+$(_bold "nelly release <sub> <name> ...")
+
+Every \`nelly deploy\` records a release: image tag, full config snapshot,
+commit pins, outcome, duration, health status, actor. Releases are the unit
+of revert — you can roll back code AND configuration to any prior state.
+
+   release list     <name>                       table of recent releases
+   release show     <name> [rel_id]              full manifest (default: latest)
+   release diff     <name> <rel_a> <rel_b>       unified config diff
+   release restore  <name> <rel_id>              revert config + switch image
+                                                  (writes a NEW release that
+                                                  records the rollback)
+   release restore  <name> <rel_id> --image-only   image only, keep current config
+   release restore  <name> <rel_id> --config-only  config only, keep current image
+   release note     <name> <rel_id> "text"
+   release prune    <name> [--keep N]            default keep 50
+
+Releases live at: containers/<name>/def/releases/<rel_id>/
+                    manifest.json, config.json, commits.lock.json,
+                    build.log, run.log
+EOF
+            ;;
+        metrics) cat <<EOF
+$(_bold "nelly metrics <name> [--app A] [--since DUR] [--release REL]")
+
+Per-app run metrics aggregated from /var/log/nelly/<app>.metrics.jsonl
+(produced by the in-container nelly-run wrapper).
+
+Columns: RUNS, OK, FAIL, AVG(s), P95(s), LAST timestamp, LAST exit code.
+
+   --app A         restrict to one app
+   --since DUR     30m, 24h, 7d, ...
+   --release REL   restrict to a release's time window
+   --json          machine-readable
+
+Examples:
+   nelly metrics scraper                       # all-time
+   nelly metrics scraper --since 24h           # last day
+   nelly metrics scraper --app fetcher
+   nelly metrics scraper --release r-0042      # how did r-0042 perform?
+EOF
+            ;;
         cron) echo "nelly cron <name> [--next N]: print the assembled crontab in human-readable form. --next N adds the next N run times per app (requires python3 on the host)." ;;
         events) echo "nelly events <name> [--since DURATION]: stream docker events for the container. Ctrl-C to stop." ;;
         plan)   echo "nelly plan <name>: print what 'nelly deploy' would do, with no side effects." ;;
@@ -385,11 +439,11 @@ _deploy_dir() {
 # Wrap the full deploy pipeline including hooks + optional wait/rollback.
 _run_deploy() {
     local d="$1"; shift
-    local wait_arg="" rollback_arg=""
+    local wait_arg="" rollback_arg="" wait_seconds=""
     declare -a pass_through=()
     while (( $# > 0 )); do
         case "$1" in
-            --wait-healthy)  wait_arg="--wait-healthy $2"; shift 2 ;;
+            --wait-healthy)  wait_arg="--wait-healthy $2"; wait_seconds="$2"; shift 2 ;;
             --auto-rollback) rollback_arg="--auto-rollback"; shift ;;
             *) pass_through+=("$1"); shift ;;
         esac
@@ -397,14 +451,29 @@ _run_deploy() {
 
     with_lock "$d" bash -c "
         set -e
+        rel_id=\$('$LIB/release.sh' create '$d')
+        export NELLY_RELEASE_ID=\$rel_id
+
+        # On any error before we get a chance to finalize, mark as failed
+        # so the release log isn't left in 'pending' forever.
+        trap '\"$LIB/release.sh\" finalize \"$d\" \"\$rel_id\" --outcome failed || true' ERR
+
         '$LIB/hooks.sh' '$d' pre_deploy
         '$LIB/fetch.sh' '$d'
         '$LIB/build.sh' '$d' ${pass_through[*]:-}
         if '$LIB/run.sh' '$d' $wait_arg $rollback_arg; then
+            trap - ERR
+            health=\$(docker inspect -f '{{.State.Health.Status}}' \\
+                \$(jq -r .container_name '$d/def/config.json') 2>/dev/null || echo n/a)
+            '$LIB/release.sh' finalize '$d' \"\$rel_id\" \\
+                --outcome success --health \"\$health\" \\
+                ${wait_seconds:+--wait-healthy $wait_seconds}
             '$LIB/hooks.sh' '$d' post_deploy || true
             '$LIB/prune.sh' '$d' || true
         else
             rc=\$?
+            trap - ERR
+            '$LIB/release.sh' finalize '$d' \"\$rel_id\" --outcome failed || true
             '$LIB/hooks.sh' '$d' on_failure || true
             exit \$rc
         fi
@@ -542,6 +611,30 @@ case "$cmd" in
     # ---- across many deployments --------------------------------------
     all)
         "$LIB/all.sh" "$@" ;;
+
+    # ---- releases (version control for deployed config + image) -------
+    release|releases)
+        sub="${1:-list}"; shift || true
+        case "$sub" in
+            list|ls) d="$(_deploy_dir "${1:-}")"; "$LIB/release.sh" list "$d" ;;
+            show)    d="$(_deploy_dir "${1:-}")"; shift || true
+                     "$LIB/release.sh" show "$d" "${1:-}" ;;
+            diff)    d="$(_deploy_dir "${1:-}")"; shift || true
+                     "$LIB/release.sh" diff "$d" "${1:-}" "${2:-}" ;;
+            restore|revert)
+                     d="$(_deploy_dir "${1:-}")"; shift || true
+                     "$LIB/release.sh" restore "$d" "$@" ;;
+            note)    d="$(_deploy_dir "${1:-}")"; shift || true
+                     "$LIB/release.sh" note "$d" "$@" ;;
+            prune)   d="$(_deploy_dir "${1:-}")"; shift || true
+                     "$LIB/release.sh" prune "$d" "$@" ;;
+            *) err "unknown release sub: $sub"; echo "Try: nelly help release" >&2; exit 2 ;;
+        esac
+        ;;
+
+    metrics)
+        d="$(_deploy_dir "${1:-}")"; shift || true
+        "$LIB/metrics.sh" "$d" "$@" ;;
 
     # ---- Telegram bot --------------------------------------------------
     bot)
