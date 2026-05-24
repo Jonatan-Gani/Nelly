@@ -148,13 +148,19 @@ for p in "${PORTS[@]}"; do
     DOCKER_ARGS+=(-p "$p")
 done
 
-# Deployment-wide secrets via --env-file (visible to all apps inside the container).
+# Deployment-wide secrets:
+#   --env-file mounts them as env vars at container start (so `docker exec`
+#   and PID 1 see them), AND
+#   we ALSO bind-mount the file as /etc/nelly/global.env so `nelly-run`
+#   can source it for cron-fired jobs (cron clears its env on dispatch,
+#   so --env-file alone is not enough).
 if [[ -f "$ENV_FILE" ]]; then
     DOCKER_ARGS+=(--env-file "$ENV_FILE")
+    DOCKER_ARGS+=(-v "$ENV_FILE:/etc/nelly/global.env:ro")
 fi
 
 # Per-app secrets — bind-mounted read-only into the container at
-# /etc/nelly/secrets/. `nelly-run` sources only the current app's file at
+# /etc/nelly/secrets/. `nelly-run` sources the matching app's file at
 # invocation time, so cron jobs for different apps in the same container
 # do NOT share each other's env vars at runtime.
 APP_SECRETS_DIR="$DEPLOY_DIR/def/secrets"

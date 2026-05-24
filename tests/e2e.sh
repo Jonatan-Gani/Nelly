@@ -107,16 +107,35 @@ LOG_FILE="$DEPLOY_DIR/logs/cron/hi.log"
 last_rc="$(tail -1 "$METRICS_FILE" | jq -r .rc)"
 [[ "$last_rc" == "0" ]] && pass "last run rc=0" || fail "rc=$last_rc"
 
-# Confirm both global and per-app secrets reached the python process
+# Confirm both global and per-app secrets reached the python process via run-now
 if grep -q 'GREETING_FROM=(unknown)' "$LOG_FILE" 2>/dev/null; then
-    fail "global secret didn't reach the app (GREETING_FROM was unset)"
+    fail "[run-now] global secret didn't reach the app (GREETING_FROM was unset)"
 elif grep -q 'hello from e2e' "$LOG_FILE"; then
-    pass "global secret reached app (GREETING_FROM=e2e)"
+    pass "[run-now] global secret reached app (GREETING_FROM=e2e)"
 fi
 if grep -q 'APP_TOKEN=abc123' "$LOG_FILE"; then
-    pass "per-app secret reached app (APP_TOKEN=abc123)"
+    pass "[run-now] per-app secret reached app (APP_TOKEN=abc123)"
 elif grep -q 'APP_TOKEN=(unset)' "$LOG_FILE"; then
-    fail "per-app secret not visible (APP_TOKEN unset)"
+    fail "[run-now] per-app secret not visible (APP_TOKEN unset)"
+fi
+
+# Cron clears its environment when dispatching jobs, so --env-file alone
+# isn't enough. Verify the cron-style path (nelly-run sourced inside the
+# container) ALSO sees both secret scopes. This catches the bug where
+# global secrets reach run-now but not the actual cron-fired runs.
+echo > "$LOG_FILE"   # clear so we can detect the new line cleanly
+docker exec "$NAME" /usr/local/bin/nelly-run hi hi.py
+sleep 1
+if grep -q 'hello from e2e' "$LOG_FILE"; then
+    pass "[cron-style] global secret reached cron-fired script"
+else
+    fail "[cron-style] global secret missing from cron-fired script (cat $LOG_FILE)"
+    cat "$LOG_FILE"
+fi
+if grep -q 'APP_TOKEN=abc123' "$LOG_FILE"; then
+    pass "[cron-style] per-app secret reached cron-fired script"
+else
+    fail "[cron-style] per-app secret missing from cron-fired script"
 fi
 
 # ----------------------------------------------------------------------------

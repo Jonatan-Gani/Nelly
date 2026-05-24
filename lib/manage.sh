@@ -118,15 +118,23 @@ case "$sub" in
               "$DEPLOY_DIR/def/config.json")"
         [[ -n "$ep" ]] || die "app $APP has no entrypoint in config.json"
         # Defense-in-depth: even though validate_config restricts the
-        # characters allowed in entrypoint, re-check here so this code
-        # path stays safe if something edits config.json in-flight.
+        # characters allowed in entrypoint + app name, re-check here so this
+        # code path stays safe if something edits config.json in-flight.
         [[ "$ep" =~ ^[A-Za-z0-9_./-]+$ && "$ep" != /* && "$ep" != *..* ]] \
             || die "entrypoint '$ep' contains unsafe characters; refusing to run"
+        [[ "$APP" =~ ^[A-Za-z0-9_-]+$ ]] \
+            || die "invalid app name; refusing to run"
         info "running $APP/$ep in $CN"
-        # Pass python and the entrypoint as separate argv entries — no shell
-        # interpolation, no quoting concerns.
-        docker exec -w "/home/apps/$APP" "$CN" \
-            "/opt/venvs/$APP/bin/python" "/home/apps/$APP/$ep"
+        # Source the same global + per-app secrets that nelly-run sources for
+        # cron-fired runs, so run-now behaves the same as a real cron tick.
+        # Values are validated, so this shell wrap is safe.
+        docker exec -w "/home/apps/$APP" "$CN" /bin/bash -c "
+            set -a
+            [ -f /etc/nelly/global.env ]            && . /etc/nelly/global.env
+            [ -f /etc/nelly/secrets/$APP.env ]      && . /etc/nelly/secrets/$APP.env
+            set +a
+            exec /opt/venvs/$APP/bin/python /home/apps/$APP/$ep
+        "
         ;;
 
     top)

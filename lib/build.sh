@@ -157,14 +157,15 @@ for f in "$log" "$metrics"; do
     fi
 done
 
-# Per-app secrets — sourced after global env-file so they take precedence.
-# Files are bind-mounted read-only from the host's def/secrets/.
-if [ -f "$secrets_file" ]; then
-    set -a
-    # shellcheck disable=SC1090
-    . "$secrets_file"
-    set +a
-fi
+# Secrets — cron clears its environment when dispatching a job, so we
+# can't rely on `docker run --env-file` reaching the script here. Both
+# the global file and the per-app file are bind-mounted read-only into
+# /etc/nelly/ by lib/run.sh; we source them explicitly so the python
+# process gets the env it expects. Per-app overrides global on conflict.
+set -a
+[ -f /etc/nelly/global.env ] && . /etc/nelly/global.env
+[ -f "$secrets_file"        ] && . "$secrets_file"
+set +a
 
 ts_iso="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 ts_start="$(date +%s)"
