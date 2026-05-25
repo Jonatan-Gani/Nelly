@@ -147,7 +147,6 @@ done
 # ---- 5d. docker disk usage -------------------------------------------------
 
 if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
-    total_mb="$(docker system df --format '{{.Size}}' 2>/dev/null | head -1 || true)"
     img_count="$(docker images "$(jqget "$CONFIG" '.image_name')" -q 2>/dev/null | wc -l | tr -d ' ')"
     ok "this deployment has $img_count Docker image(s) on disk"
 fi

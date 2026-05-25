@@ -137,8 +137,9 @@ finalize_release() {
     done
     [[ -n "$outcome" ]] || die "finalize: --outcome required"
 
-    local dir; dir="$(_releases_dir "$deploy_dir")/$rel_id"
-    local manifest="$dir/manifest.json"
+    local dir manifest
+    dir="$(_releases_dir "$deploy_dir")/$rel_id"
+    manifest="$dir/manifest.json"
     [[ -f "$manifest" ]] || die "no such release: $rel_id"
 
     # Image fallback: read def/last_image.txt
@@ -218,7 +219,8 @@ show_release() {
     local deploy_dir="$1" rel_id="${2:-}"
     [[ -n "$rel_id" ]] || rel_id="$(_latest_release "$deploy_dir")"
     [[ -n "$rel_id" ]] || die "no releases yet"
-    local m="$(_releases_dir "$deploy_dir")/$rel_id/manifest.json"
+    local m
+    m="$(_releases_dir "$deploy_dir")/$rel_id/manifest.json"
     [[ -f "$m" ]] || die "no such release: $rel_id"
     if [[ "${NELLY_OUTPUT:-human}" == "json" ]]; then
         jq . "$m"
@@ -243,8 +245,9 @@ note        : \(.note)"' "$m"
 
 diff_releases() {
     local deploy_dir="$1" a="$2" b="$3"
-    local ca="$(_releases_dir "$deploy_dir")/$a/config.json"
-    local cb="$(_releases_dir "$deploy_dir")/$b/config.json"
+    local ca cb
+    ca="$(_releases_dir "$deploy_dir")/$a/config.json"
+    cb="$(_releases_dir "$deploy_dir")/$b/config.json"
     [[ -f "$ca" ]] || die "no such release: $a"
     [[ -f "$cb" ]] || die "no such release: $b"
     if command -v diff >/dev/null 2>&1; then
@@ -269,7 +272,8 @@ restore_release() {
             *) shift ;;
         esac
     done
-    local dir="$(_releases_dir "$deploy_dir")/$rel_id"
+    local dir
+    dir="$(_releases_dir "$deploy_dir")/$rel_id"
     [[ -f "$dir/manifest.json" ]] || die "no such release: $rel_id"
 
     local image
@@ -314,7 +318,8 @@ restore_release() {
 
 note_release() {
     local deploy_dir="$1" rel_id="$2" text="$3"
-    local m="$(_releases_dir "$deploy_dir")/$rel_id/manifest.json"
+    local m
+    m="$(_releases_dir "$deploy_dir")/$rel_id/manifest.json"
     [[ -f "$m" ]] || die "no such release: $rel_id"
     jq_inplace "$m" --arg t "$text" '.note = $t'
     info "set note on $rel_id"
@@ -329,15 +334,19 @@ prune_releases() {
             *) keep="$1"; shift ;;     # positional fallback
         esac
     done
-    local idx="$(_index_file "$deploy_dir")"
+    local idx rdir total n_del
+    idx="$(_index_file "$deploy_dir")"
+    rdir="$(_releases_dir "$deploy_dir")"
     [[ -f "$idx" ]] || return 0
-    local total; total="$(jq '.releases | length' "$idx")"
+    total="$(jq '.releases | length' "$idx")"
     (( total > keep )) || return 0
-    local n_del=$((total - keep))
+    n_del=$((total - keep))
     # Oldest entries are at the front of the array; remove their dirs.
     mapfile -t to_drop < <(jq -r --argjson n "$n_del" '.releases[:$n] | .[].release_id' "$idx")
     for rid in "${to_drop[@]}"; do
-        rm -rf "$(_releases_dir "$deploy_dir")/$rid"
+        # `${rdir:?}` aborts if rdir is somehow empty, preventing `rm -rf /$rid`.
+        [[ -n "$rid" ]] || continue
+        rm -rf "${rdir:?}/$rid"
     done
     jq_inplace "$idx" --argjson n "$n_del" '.releases = .releases[$n:]'
     info "pruned $n_del old release(s); kept $keep"

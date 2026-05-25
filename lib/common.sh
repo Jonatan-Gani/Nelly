@@ -1,4 +1,5 @@
 # lib/common.sh — shared bash helpers. Source me; do not execute.
+# shellcheck shell=bash
 # Callers must set: set -euo pipefail
 
 # ---- logging ---------------------------------------------------------------
