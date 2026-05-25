@@ -18,10 +18,17 @@ if [[ "${NELLY_OUTPUT:-human}" == "json" ]]; then
     started="$(docker inspect -f '{{.State.StartedAt}}' "$CONTAINER_NAME" 2>/dev/null || echo '')"
     image="$(cat "$DEPLOY_DIR/def/last_image.txt" 2>/dev/null || echo '')"
     pinned='{}'; [[ -f "$LOCKFILE" ]] && pinned="$(cat "$LOCKFILE")"
+    # Include the schedule + entrypoint for each app so the bot can render
+    # a single-message status view without making a second call for config.
+    schedules="$(jq -c '[.apps[] | {app: .app_name,
+                                     schedule: (.schedule  // ""),
+                                     entrypoint: (.entrypoint // "")}]' "$CONFIG")"
     jq -nc \
         --arg c "$CONTAINER_NAME" --arg s "$state" --arg h "$health" \
-        --arg st "$started" --arg i "$image" --argjson p "$pinned" \
-        '{container:$c, state:$s, health:$h, started:$st, image:$i, pinned:$p}'
+        --arg st "$started" --arg i "$image" \
+        --argjson p "$pinned" --argjson sched "$schedules" \
+        '{container:$c, state:$s, health:$h, started:$st, image:$i,
+          pinned:$p, schedules:$sched}'
     exit 0
 fi
 
