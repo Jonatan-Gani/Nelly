@@ -229,6 +229,20 @@ validate_config() {
             || errors+=(".base_image '$bimg' is not a valid image reference")
     fi
 
+    # Healthcheck duration fields — docker accepts Ns / Nm / Nh / Nms.
+    local hcfield hcval
+    for hcfield in interval timeout start_period; do
+        hcval="$(jqget "$config" ".health.$hcfield" '')"
+        if [[ -n "$hcval" ]] && ! [[ "$hcval" =~ ^[0-9]+(ns|us|ms|s|m|h)$ ]]; then
+            errors+=(".health.$hcfield '$hcval' must look like '30s', '500ms', '1m', …")
+        fi
+    done
+    local hcretries
+    hcretries="$(jqget "$config" '.health.retries' '')"
+    if [[ -n "$hcretries" ]] && ! [[ "$hcretries" =~ ^[0-9]+$ ]]; then
+        errors+=(".health.retries '$hcretries' must be a non-negative integer")
+    fi
+
     if (( ${#errors[@]} > 0 )); then
         err "config validation failed for $config:"
         for e in "${errors[@]}"; do err "  - $e"; done

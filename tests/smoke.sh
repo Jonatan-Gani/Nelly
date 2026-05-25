@@ -438,6 +438,18 @@ else
 fi
 bin/nelly set "$NAME" '.base_image' '""' >/dev/null
 
+# Healthcheck duration fields validated.
+if bin/nelly set "$NAME" '.health.interval' '"60 seconds"' >/dev/null 2>&1; then
+    fail "accepted bad health.interval"
+else
+    pass "rejected bad health.interval"
+fi
+if bin/nelly set "$NAME" '.health.start_period' '"30s"' >/dev/null 2>&1; then
+    pass "accepted valid health.start_period"
+else
+    fail "rejected valid health.start_period"
+fi
+
 # image-prune dispatches without docker (it just won't find anything to prune).
 # The script requires `docker info` to succeed before doing work, so without
 # docker it should error out gracefully. We just check the command path is wired.

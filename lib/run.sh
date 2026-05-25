@@ -117,12 +117,19 @@ HC_CMD="$(jqget "$CONFIG"      '.health.cmd' '')"
 HC_INTERVAL="$(jqget "$CONFIG" '.health.interval' '30s')"
 HC_TIMEOUT="$(jqget "$CONFIG"  '.health.timeout'  '5s')"
 HC_RETRIES="$(jqget "$CONFIG"  '.health.retries'  '3')"
+# start_period: docker doesn't count failed checks against unhealthy during
+# this window and (on Docker 25+) checks fire every start-interval (2s by
+# default). 30s is a sensible default — image cold-starts on slower hosts
+# (Pi, CI runners) can take longer than the regular 30s interval to bring
+# cron to life, which would race --wait-healthy without a grace period.
+HC_START="$(jqget "$CONFIG"    '.health.start_period' '30s')"
 [[ -z "$HC_CMD" ]] && HC_CMD="pgrep -x cron >/dev/null || exit 1"
 DOCKER_ARGS+=(
-    --health-cmd      "$HC_CMD"
-    --health-interval "$HC_INTERVAL"
-    --health-timeout  "$HC_TIMEOUT"
-    --health-retries  "$HC_RETRIES"
+    --health-cmd          "$HC_CMD"
+    --health-interval     "$HC_INTERVAL"
+    --health-timeout      "$HC_TIMEOUT"
+    --health-retries      "$HC_RETRIES"
+    --health-start-period "$HC_START"
 )
 
 # Primary network

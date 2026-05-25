@@ -61,9 +61,12 @@ PY
 
 # Force the e2e container off the default network — just publish nothing.
 bin/nelly -y init "$NAME" >/dev/null 2>&1
-# Disable healthcheck during e2e — cron may not have started by the time we check.
 bin/nelly set  "$NAME" '.network'  '{}'                    >/dev/null
 bin/nelly set  "$NAME" '.packages' '[]'                    >/dev/null
+# Make the healthcheck fire frequently so the test doesn't have to wait
+# the default 30s interval before its first chance to pass.
+bin/nelly set  "$NAME" '.health.interval'     '"3s"'       >/dev/null
+bin/nelly set  "$NAME" '.health.start_period' '"60s"'      >/dev/null
 bin/nelly app add "$NAME" --name hi --local "$SRC_DIR" \
     --schedule "*/1 * * * *" --entrypoint hi.py            >/dev/null
 [[ "$(bin/nelly get "$NAME" '.apps[0].app_name')" == "hi" ]] \
@@ -80,9 +83,9 @@ bin/nelly secrets set "$NAME" --app hi  APP_TOKEN=abc123  >/dev/null
 # ----------------------------------------------------------------------------
 section "deploy (real build + run)"
 
-# Note: --wait-healthy here is short. Cron runs as the healthcheck target;
-# pgrep cron is available immediately after `cron -f` boots, so this is fast.
-if bin/nelly deploy "$NAME" --wait-healthy 30 --auto-rollback 2>&1 | tail -50 >/tmp/deploy-e2e.log; then
+# `--wait-healthy 90` matches the configured 60s start_period plus margin
+# for the first cron-up + pgrep cycle on a cold CI runner.
+if bin/nelly deploy "$NAME" --wait-healthy 90 --auto-rollback 2>&1 | tail -80 >/tmp/deploy-e2e.log; then
     pass "first deploy succeeded"
 else
     cat /tmp/deploy-e2e.log
@@ -154,7 +157,7 @@ section "second deploy → second release → image-prune kept the right images"
 
 # Tiny config change so build hash changes
 bin/nelly set "$NAME" '.resources.pids_limit' '300' >/dev/null
-bin/nelly deploy "$NAME" --wait-healthy 30 --auto-rollback 2>&1 | tail -5
+bin/nelly deploy "$NAME" --wait-healthy 90 --auto-rollback 2>&1 | tail -5
 n_rel="$(bin/nelly --json release list "$NAME" | jq 'length')"
 (( n_rel >= 2 )) && pass "second release exists ($n_rel total)" || fail "n_rel=$n_rel"
 

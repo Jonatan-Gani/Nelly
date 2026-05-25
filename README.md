@@ -491,11 +491,16 @@ jobs:
     "pids_limit":   256
   },
 
+  // start_period is a grace window during container boot where failed
+  // health checks don't count and (on Docker 25+) checks fire faster.
+  // Required so `--wait-healthy` doesn't race the first regular check
+  // on cold-starting hosts (Pi, CI runners).
   "health": {
-    "cmd":      "",          // empty → default ("cron is running")
-    "interval": "30s",
-    "timeout":  "5s",
-    "retries":  3
+    "cmd":          "",          // empty → default ("cron is running")
+    "interval":     "30s",
+    "timeout":      "5s",
+    "retries":      3,
+    "start_period": "30s"
   },
 
   "network": {
