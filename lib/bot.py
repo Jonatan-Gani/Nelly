@@ -10,27 +10,32 @@ Every response is designed to fit a phone screen in portrait mode:
   - All tabular / key-value content lives INSIDE <pre> blocks (monospace,
     so columns line up identically on every Telegram client).
   - Lines are kept to ~38 characters or less so they don't wrap on
-    typical phone widths. Wider data is reformatted as vertical cards
-    (title line + indented key:value pairs) instead of horizontal
-    tables.
+    typical phone widths.
   - No emoji. Status is conveyed with plain words ("running", "failed")
-    and text markers like [OK] / [WARN] / [FAIL].
+    and text markers like [OK] / [WARN] / [FAIL] in checklist views.
+  - Most messages have an inline keyboard with the obvious next actions
+    (drill into a deployment, refresh, restart, etc.) so the user
+    doesn't have to type commands.
 
 Security model
 --------------
 - Token loaded from <nelly_root>/bot/.token (mode 0600). Never logged.
 - Allowed user IDs come from <nelly_root>/bot/config.json (allowed_users).
-  Anyone not on the list is *silently ignored* — the bot does not respond,
-  which avoids confirming the bot exists to a wrong audience.
-- Every incoming message is logged to <nelly_root>/bot/bot.log with
+  Anyone not on the list is silently ignored — for both message and
+  callback_query updates.
+- Every incoming update is logged to <nelly_root>/bot/bot.log with
   timestamp, user id, command, and outcome.
 - Commands are dispatched via a hard-coded allow-list mapping each
-  command to (handler, allow_when_read_only). Write commands are gated
-  behind config.allow_writes.
+  command to (handler, allow_when_read_only). Write commands and write
+  button taps are both gated behind config.allow_writes.
+- Callback data carries a short opcode + validated args; the same
+  COMMANDS table is used for text and button-driven invocation, so
+  there's no separate "secret" code path.
 - Arguments are validated against strict regex patterns before being
   passed to `nelly` via subprocess.run([...], shell=False). No string
   interpolation reaches a shell.
-- Per-user rate limiting: at most N commands per window.
+- Per-user rate limiting: at most N commands per window (counts both
+  typed commands and button taps).
 - Responses are sent with parse_mode=HTML; all user-controlled content
   is HTML-escaped via html.escape().
 - Responses are truncated to 3800 chars (Telegram limit is 4096).
@@ -40,14 +45,17 @@ Python stdlib only — no pip install.
 
 from __future__ import annotations
 
+import datetime
 import html
 import json
 import logging
 import os
 import re
 import signal
+import socket
 import subprocess
 import sys
+import textwrap
 import time
 import urllib.parse
 import urllib.request
@@ -61,6 +69,7 @@ TOKEN_PATH = BOT_DIR / ".token"
 CONFIG_PATH = BOT_DIR / "config.json"
 LOG_PATH   = BOT_DIR / "bot.log"
 NELLY_BIN  = NELLY_ROOT / "bin" / "nelly"
+HOST_NAME  = socket.gethostname()
 
 API_BASE     = "https://api.telegram.org"
 POLL_TIMEOUT = 30
@@ -68,10 +77,8 @@ RESP_TRUNCATE = 3800
 NELLY_CMD_TIMEOUT = 60
 RATE_LIMIT_WINDOW = 60
 RATE_LIMIT_MAX    = 30
-
-# Target maximum line length inside <pre> blocks. ~38 fits comfortably on a
-# portrait phone in Telegram's monospace font.
 MOBILE_WIDTH = 38
+CB_MAX = 64                # Telegram callback_data byte limit
 
 # ---------------------------------------------------------------------------
 # logging
@@ -130,11 +137,17 @@ def tg(token: str, method: str, **params: Any) -> dict:
     with urllib.request.urlopen(req, timeout=POLL_TIMEOUT + 10) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
-def send_message(token: str, chat_id: int, text: str) -> None:
+def send_message(token: str, chat_id: int, text: str,
+                 keyboard: list | None = None) -> None:
     text = text[:RESP_TRUNCATE]
+    params: dict[str, Any] = {
+        "chat_id": chat_id, "text": text,
+        "parse_mode": "HTML", "disable_web_page_preview": "true",
+    }
+    if keyboard:
+        params["reply_markup"] = json.dumps({"inline_keyboard": keyboard})
     try:
-        tg(token, "sendMessage", chat_id=chat_id, text=text,
-           parse_mode="HTML", disable_web_page_preview="true")
+        tg(token, "sendMessage", **params)
     except Exception as e:
         log.warning("sendMessage failed (chat_id=%s): %s", chat_id, e)
         try:
@@ -143,6 +156,13 @@ def send_message(token: str, chat_id: int, text: str) -> None:
                disable_web_page_preview="true")
         except Exception:
             pass
+
+def answer_callback(token: str, cb_id: str, text: str | None = None) -> None:
+    try:
+        tg(token, "answerCallbackQuery", callback_query_id=cb_id,
+           text=(text[:200] if text else None))
+    except Exception as e:
+        log.warning("answerCallbackQuery failed: %s", e)
 
 # ---------------------------------------------------------------------------
 # HTML helpers
@@ -157,12 +177,10 @@ def code(s: Any) -> str: return f"<code>{esc(s)}</code>"
 def pre(s: Any)  -> str: return f"<pre>{esc(s)}</pre>"
 
 # ---------------------------------------------------------------------------
-# value compactors — keep every cell inside MOBILE_WIDTH
+# compactors
 # ---------------------------------------------------------------------------
 
 def short_image(img: str) -> str:
-    """`hello:f453b0b880ef` -> `hello:f453b0b8`. Digest form collapses to
-    `image@...`. Always returns at most ~22 chars."""
     if not img or img in ("(none)", "(not built)"):
         return img or "(none)"
     if "@" in img:
@@ -175,13 +193,25 @@ def short_image(img: str) -> str:
     return img
 
 def fmt_ts(ts: str) -> str:
-    """ISO timestamp -> 'YYYY-MM-DD HH:MM' (16 chars). Blank ts -> '-'."""
     if not ts: return "-"
     m = re.match(r"^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2})", ts)
     return f"{m.group(1)} {m.group(2)}" if m else ts
 
+def fmt_age_from_iso(ts: str) -> str:
+    """ISO timestamp -> '5m ago' / '2h ago' / '3d ago'. '-' if missing."""
+    if not ts: return "-"
+    try:
+        dt = datetime.datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        now = datetime.datetime.now(datetime.timezone.utc)
+        delta = (now - dt).total_seconds()
+    except Exception:
+        return "-"
+    if delta < 60:    return "just now"
+    if delta < 3600:  return f"{int(delta/60)}m ago"
+    if delta < 86400: return f"{int(delta/3600)}h ago"
+    return f"{int(delta/86400)}d ago"
+
 def trunc(s: str, n: int) -> str:
-    """Trim to at most n chars; suffix `...` if anything was cut."""
     if s is None: return ""
     s = str(s)
     return s if len(s) <= n else s[: max(0, n - 3)] + "..."
@@ -191,15 +221,6 @@ def trunc(s: str, n: int) -> str:
 # ---------------------------------------------------------------------------
 
 def card(title: str, pairs: Iterable[tuple[str, Any]]) -> str:
-    """One vertical card. Returns plain text (caller wraps in <pre>).
-
-        title
-          key1:   value1
-          key2:   value2
-
-    Empty / None / 'n/a' values are dropped. Keys are padded so all
-    colons line up.
-    """
     valid = [(str(k), str(v)) for k, v in pairs
              if v not in (None, "", "n/a")]
     out = [title]
@@ -210,7 +231,6 @@ def card(title: str, pairs: Iterable[tuple[str, Any]]) -> str:
     return "\n".join(out)
 
 def kv(pairs: Iterable[tuple[str, Any]], *, key_width: int | None = None) -> str:
-    """Aligned `key : value` lines (no title)."""
     valid = [(str(k), str(v)) for k, v in pairs
              if v not in (None, "", "n/a")]
     if not valid: return ""
@@ -219,7 +239,6 @@ def kv(pairs: Iterable[tuple[str, Any]], *, key_width: int | None = None) -> str
 
 def narrow_table(rows: list[list[str]], headers: list[str] | None = None,
                  gutter: str = "  ") -> str:
-    """Aligned table for cases where the data fits in MOBILE_WIDTH."""
     str_rows = [[str(c) if c is not None else "" for c in row] for row in rows]
     all_rows = [list(headers)] + str_rows if headers else str_rows
     if not all_rows: return ""
@@ -233,10 +252,51 @@ def narrow_table(rows: list[list[str]], headers: list[str] | None = None,
     )
 
 def section(title: str, body: str) -> str:
-    """Bold header outside <pre>, body inside <pre>. Hidden if body empty."""
     if not body:
         return ""
     return f"{b(title)}\n{pre(body)}"
+
+# ---------------------------------------------------------------------------
+# inline keyboards
+# ---------------------------------------------------------------------------
+
+def _btn(label: str, data: str) -> dict | None:
+    """Build one button if callback_data fits in 64 bytes; else drop it."""
+    if len(data.encode("utf-8")) > CB_MAX:
+        log.warning("dropping button (cb_data too long): %s", data)
+        return None
+    return {"text": label, "callback_data": data}
+
+def kbd(*rows: list[tuple[str, str]]) -> list[list[dict]]:
+    """Build an inline_keyboard from (label, callback_data) tuples.
+    Empty rows and dropped buttons are filtered out."""
+    out = []
+    for row in rows:
+        btns = [_btn(label, data) for label, data in row]
+        btns = [b for b in btns if b is not None]
+        if btns:
+            out.append(btns)
+    return out
+
+# Button rows we reuse across commands.
+
+def kbd_for_deployment(n: str, allow_writes: bool) -> list[list[tuple[str, str]]]:
+    """The standard action row for a single deployment."""
+    rows = [
+        [("Logs",     f"lg|{n}"),
+         ("Metrics",  f"m|{n}"),
+         ("Cron",     f"c|{n}")],
+        [("Releases", f"rs|{n}"),
+         ("Doctor",   f"d|{n}"),
+         ("Refresh",  f"s|{n}")],
+    ]
+    if allow_writes:
+        rows.append([
+            ("Restart", f"re|{n}"),
+            ("Stop",    f"st|{n}"),
+            ("Deploy",  f"dp|{n}"),
+        ])
+    return rows
 
 # ---------------------------------------------------------------------------
 # arg validation
@@ -271,13 +331,101 @@ def run_nelly(*args: str, json_output: bool = False) -> tuple[int, str]:
 def fmt_err(rc: int, out: str) -> str:
     return f"{b('command failed')}  exit {rc}\n{pre(out[:1500].rstrip() or '(no output)')}"
 
+# A handler returns either a plain HTML string or a (string, keyboard) tuple.
+Response = str | tuple[str, list]
+
+def _split_resp(resp: Response) -> tuple[str, list | None]:
+    if isinstance(resp, tuple):
+        return resp[0], (resp[1] if len(resp) > 1 else None)
+    return resp, None
+
 # ---------------------------------------------------------------------------
-# command handlers
+# /start — dashboard
 # ---------------------------------------------------------------------------
 
-# ---- /help, /id ------------------------------------------------------------
+def _latest_release_info(deployment: str) -> tuple[str, str, str] | None:
+    """Read the latest entry from def/releases.index.json.
+    Returns (release_id, outcome, age_text) or None."""
+    idx = NELLY_ROOT / "containers" / deployment / "def" / "releases.index.json"
+    if not idx.is_file():
+        return None
+    try:
+        data = json.loads(idx.read_text())
+        releases = data.get("releases") or []
+        if not releases:
+            return None
+        last = releases[-1]
+        rel_id = last.get("release_id", "?")
+        outcome = last.get("outcome", "?")
+        ts = last.get("finalized_at") or last.get("created_at") or ""
+        return rel_id, outcome, fmt_age_from_iso(ts)
+    except Exception:
+        return None
+
+def cmd_start(_args, allow_writes, **_) -> Response:
+    """First-touch view: counts + per-deployment one-liner + quick buttons."""
+    rc, raw = run_nelly("list", json_output=True)
+    items: list[dict] = []
+    if rc == 0:
+        try:
+            items = json.loads(raw)
+        except Exception:
+            items = []
+
+    n_total      = len(items)
+    n_running    = sum(1 for d in items if d.get("state") == "running")
+    n_unhealthy  = sum(1 for d in items if d.get("state") in ("unhealthy", "restarting"))
+    n_failed     = sum(1 for d in items if d.get("state") in ("exited", "dead"))
+    n_absent     = sum(1 for d in items if d.get("state") == "absent")
+
+    out = [b(f"Nelly — {HOST_NAME}"), ""]
+
+    out.append(section("Summary", kv([
+        ("deployments", n_total),
+        ("running",     n_running),
+        ("unhealthy",   n_unhealthy if n_unhealthy else None),
+        ("failed",      n_failed if n_failed else None),
+        ("absent",      n_absent if n_absent else None),
+    ])))
+
+    if items:
+        deploy_blocks = []
+        for d in items:
+            name  = trunc(d.get("deployment", "?"), 22)
+            state = d.get("state", "?")
+            line1 = f"{name}  ({state})"
+            rel = _latest_release_info(d.get("deployment", ""))
+            if rel:
+                rel_id, outcome, age = rel
+                deploy_blocks.append(
+                    f"{line1}\n  last: {rel_id} {outcome}  {age}"
+                )
+            else:
+                deploy_blocks.append(line1)
+        out += ["", section("Deployments", "\n\n".join(deploy_blocks))]
+    else:
+        out += ["", i_("no deployments yet — run `nelly init <name>` on the host")]
+
+    # Build keyboard: one button per deployment (up to 9), in rows of 3.
+    kbd_rows: list[list[tuple[str, str]]] = []
+    row: list[tuple[str, str]] = []
+    for d in items[:9]:
+        name = d.get("deployment", "")
+        if not name: continue
+        row.append((trunc(name, 14), f"s|{name}"))
+        if len(row) == 3:
+            kbd_rows.append(row); row = []
+    if row: kbd_rows.append(row)
+    kbd_rows.append([("Refresh", "start"), ("Help", "help")])
+
+    return "\n".join(out), kbd(*kbd_rows)
+
+# ---------------------------------------------------------------------------
+# /help
+# ---------------------------------------------------------------------------
 
 HELP_READ = """\
+/start            dashboard (you're here)
 /list             deployments
 /status   <n>     one deployment
 /ps               containers
@@ -301,18 +449,23 @@ HELP_WRITE = """\
 /rollback         <n>
 /release_restore  <n> <id>"""
 
-def cmd_help(_args, allow_writes, **_) -> str:
+def cmd_help(_args, allow_writes, **_) -> Response:
     parts = [b("Nelly bot"), "", section("Read-only", HELP_READ)]
     if allow_writes:
         parts += ["", section("Write", HELP_WRITE)]
-    return "\n".join(p for p in parts if p)
+    parts += ["", i_("tip: most messages have buttons — tap instead of typing.")]
+    return "\n".join(p for p in parts if p), kbd(
+        [("Dashboard", "start"), ("List", "ls")],
+    )
 
 def cmd_id(_args, _aw, *, user_id: int = 0, **_) -> str:
     return f"{b('Your Telegram user id')}\n{pre(str(user_id))}"
 
-# ---- /list, /ps, /stats — vertical cards ----------------------------------
+# ---------------------------------------------------------------------------
+# /list, /ps, /stats
+# ---------------------------------------------------------------------------
 
-def cmd_list(_args, _aw, **_) -> str:
+def cmd_list(_args, allow_writes, **_) -> Response:
     rc, raw = run_nelly("list", json_output=True)
     if rc != 0: return fmt_err(rc, raw)
     try:
@@ -330,9 +483,22 @@ def cmd_list(_args, _aw, **_) -> str:
             [("apps",  d.get("apps", 0)),
              ("image", short_image(d.get("image", "")))],
         ))
-    return section("Deployments", "\n\n".join(cards))
+    text = section("Deployments", "\n\n".join(cards))
 
-def cmd_ps(_args, _aw, **_) -> str:
+    # Buttons: one per deployment, up to 9, rows of 3.
+    rows: list[list[tuple[str, str]]] = []
+    row: list[tuple[str, str]] = []
+    for d in items[:9]:
+        name = d.get("deployment", "")
+        if not name: continue
+        row.append((trunc(name, 14), f"s|{name}"))
+        if len(row) == 3:
+            rows.append(row); row = []
+    if row: rows.append(row)
+    rows.append([("Dashboard", "start"), ("Refresh", "ls")])
+    return text, kbd(*rows)
+
+def cmd_ps(_args, _aw, **_) -> Response:
     rc, raw = run_nelly("ps", json_output=True)
     if rc != 0: return fmt_err(rc, raw)
     try:
@@ -349,16 +515,17 @@ def cmd_ps(_args, _aw, **_) -> str:
              if kv_str.startswith("nelly.deployment=")),
             c.get("Names", "?"),
         )
-        # Status looks like "Up 2 hours (healthy)" — trim if needed.
         status = trunc(c.get("Status", ""), 30)
         cards.append(card(
             trunc(deployment, 22),
             [("status", status),
              ("image",  short_image(c.get("Image", "")))],
         ))
-    return section("Containers", "\n\n".join(cards))
+    return section("Containers", "\n\n".join(cards)), kbd(
+        [("Dashboard", "start"), ("Refresh", "ps")],
+    )
 
-def cmd_stats(_args, _aw, **_) -> str:
+def cmd_stats(_args, _aw, **_) -> Response:
     rc, raw = run_nelly("stats", json_output=True)
     if rc != 0: return fmt_err(rc, raw)
     try:
@@ -376,9 +543,13 @@ def cmd_stats(_args, _aw, **_) -> str:
              ("size", trunc(s.get("MemUsage", "?"), 30)),
              ("pids", s.get("PIDs", "?"))],
         ))
-    return section("Live stats", "\n\n".join(cards))
+    return section("Live stats", "\n\n".join(cards)), kbd(
+        [("Dashboard", "start"), ("Refresh", "stats")],
+    )
 
-# ---- /status ---------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# /status
+# ---------------------------------------------------------------------------
 
 def _one_name(args):
     if not args: return None, "needs a deployment name"
@@ -386,7 +557,7 @@ def _one_name(args):
     if not n: return None, f"invalid name: {esc(args[0])!r}"
     return n, None
 
-def cmd_status(args, _aw, **_) -> str:
+def cmd_status(args, allow_writes, **_) -> Response:
     n, err = _one_name(args)
     if err: return err
     rc, raw = run_nelly("status", n, json_output=True)
@@ -410,8 +581,6 @@ def cmd_status(args, _aw, **_) -> str:
 
     scheds = d.get("schedules") or []
     if scheds:
-        # Cards per app — schedule + entrypoint are often too wide combined
-        # for a table at ~38 chars, so vertical layout wins.
         app_cards = []
         for s in scheds:
             sched = s.get("schedule") or "(unscheduled)"
@@ -431,11 +600,13 @@ def cmd_status(args, _aw, **_) -> str:
             lines.append(f"{k:<{kw}}  {trunc(str(v), 22)}")
         out += ["", section("Pinned revisions", "\n".join(lines))]
 
-    return "\n".join(out)
+    return "\n".join(out), kbd(*kbd_for_deployment(n, allow_writes))
 
-# ---- /cron, /metrics — vertical cards per app -----------------------------
+# ---------------------------------------------------------------------------
+# /cron, /metrics
+# ---------------------------------------------------------------------------
 
-def cmd_cron(args, _aw, **_) -> str:
+def cmd_cron(args, _aw, **_) -> Response:
     n, err = _one_name(args)
     if err: return err
     rc, raw = run_nelly("cron", n, json_output=True)
@@ -445,7 +616,9 @@ def cmd_cron(args, _aw, **_) -> str:
     except Exception:
         return fmt_err(1, raw)
     if not items:
-        return f"{b(f'{n} - schedules')}\n{pre('(no apps)')}"
+        return f"{b(f'{n} - schedules')}\n{pre('(no apps)')}", kbd(
+            [("Status", f"s|{n}"), ("Dashboard", "start")],
+        )
 
     cards = []
     for it in items:
@@ -460,9 +633,11 @@ def cmd_cron(args, _aw, **_) -> str:
         for nxt in (it.get("next_runs") or [])[:3]:
             pairs.append(("next", nxt))
         cards.append(card(trunc(it.get("app", "?"), 22), pairs))
-    return section(f"{n} - schedules", "\n\n".join(cards))
+    return section(f"{n} - schedules", "\n\n".join(cards)), kbd(
+        [("Status", f"s|{n}"), ("Metrics", f"m|{n}"), ("Refresh", f"c|{n}")],
+    )
 
-def cmd_metrics(args, _aw, **_) -> str:
+def cmd_metrics(args, _aw, **_) -> Response:
     n, err = _one_name(args)
     if err: return err
     extra = []
@@ -481,7 +656,9 @@ def cmd_metrics(args, _aw, **_) -> str:
     except Exception:
         return fmt_err(1, raw)
     if not items:
-        return f"{b(f'{n} - metrics{label}')}\n{pre('(no runs yet)')}"
+        return f"{b(f'{n} - metrics{label}')}\n{pre('(no runs yet)')}", kbd(
+            [("Status", f"s|{n}"), ("Cron", f"c|{n}")],
+        )
 
     cards = []
     for s in items:
@@ -490,7 +667,6 @@ def cmd_metrics(args, _aw, **_) -> str:
         fl   = s.get("failed", 0)
         status = "[OK]" if fl == 0 else ("[WARN]" if ok > fl else "[FAIL]")
         title = f"{trunc(s.get('app', '?'), 20)}  {status}"
-        # Compact two-up rows inside the card.
         line_counts = f"runs:{runs:>3}   ok:{ok:>3}   fail:{fl:>3}"
         avg = s.get("avg_dur_s", 0)
         p95 = s.get("p95_dur_s", 0) or 0
@@ -500,11 +676,15 @@ def cmd_metrics(args, _aw, **_) -> str:
         line_last   = f"last: {last_ts}  rc={last_rc}"
         body = "\n".join([title, "  " + line_counts, "  " + line_dur, "  " + line_last])
         cards.append(body)
-    return section(f"{n} - metrics{label}", "\n\n".join(cards))
+    return section(f"{n} - metrics{label}", "\n\n".join(cards)), kbd(
+        [("Status", f"s|{n}"), ("24h", f"m|{n}|24h"), ("Refresh", f"m|{n}")],
+    )
 
-# ---- /releases — narrow table (rows are short) ----------------------------
+# ---------------------------------------------------------------------------
+# /releases, /release
+# ---------------------------------------------------------------------------
 
-def cmd_releases(args, _aw, **_) -> str:
+def cmd_releases(args, allow_writes, **_) -> Response:
     n, err = _one_name(args)
     if err: return err
     rc, raw = run_nelly("release", "list", n, json_output=True)
@@ -514,7 +694,9 @@ def cmd_releases(args, _aw, **_) -> str:
     except Exception:
         return fmt_err(1, raw)
     if not items:
-        return f"{b(f'{n} - releases')}\n{pre('(no releases yet)')}"
+        return f"{b(f'{n} - releases')}\n{pre('(no releases yet)')}", kbd(
+            [("Status", f"s|{n}")],
+        )
     recent = list(reversed(items))[:10]
     rows = [
         [r.get("release_id", "?"),
@@ -523,22 +705,31 @@ def cmd_releases(args, _aw, **_) -> str:
         for r in recent
     ]
     body = narrow_table(rows, headers=["ID", "WHEN", "OUTCOME"])
-    out = [section(f"{n} - releases", body)]
+    text = section(f"{n} - releases", body)
     if len(items) > 10:
-        out.append(i_(f"(showing 10 of {len(items)} - /release <id> for one)"))
-    return "\n".join(out)
+        text += "\n" + i_(f"(showing 10 of {len(items)})")
 
-# ---- /release — single card ------------------------------------------------
+    # Button per release (up to 6, rows of 2).
+    kbd_rows = []
+    row = []
+    for r in recent[:6]:
+        rid = r.get("release_id", "")
+        if not rid: continue
+        row.append((rid, f"r|{n}|{rid}"))
+        if len(row) == 2:
+            kbd_rows.append(row); row = []
+    if row: kbd_rows.append(row)
+    kbd_rows.append([("Status", f"s|{n}"), ("Refresh", f"rs|{n}")])
+    return text, kbd(*kbd_rows)
 
-def cmd_release(args, _aw, **_) -> str:
+def cmd_release(args, allow_writes, **_) -> Response:
     n, err = _one_name(args)
     if err: return err
-    if len(args) >= 2:
-        if not REL_ID_RE.match(args[1]):
-            return f"invalid release id: {esc(args[1])!r}"
-        rc, raw = run_nelly("release", "show", n, args[1], json_output=True)
-    else:
-        rc, raw = run_nelly("release", "show", n, json_output=True)
+    rel_arg = args[1] if len(args) >= 2 else None
+    if rel_arg and not REL_ID_RE.match(rel_arg):
+        return f"invalid release id: {esc(rel_arg)!r}"
+    cmd_args = ["release", "show", n] + ([rel_arg] if rel_arg else [])
+    rc, raw = run_nelly(*cmd_args, json_output=True)
     if rc != 0: return fmt_err(rc, raw)
     try:
         m = json.loads(raw)
@@ -565,15 +756,19 @@ def cmd_release(args, _aw, **_) -> str:
     ]
     note = m.get("note") or ""
     if note:
-        # Wrap note text to MOBILE_WIDTH so long notes don't blow the column.
-        import textwrap
         wrapped = "\n".join(textwrap.wrap(note, width=MOBILE_WIDTH)) or note
         out += ["", section("Note", wrapped)]
-    return "\n".join(out)
 
-# ---- /doctor, /explain, /events, /logs ------------------------------------
+    rows = [[("All releases", f"rs|{n}"), ("Status", f"s|{n}")]]
+    if allow_writes:
+        rows.append([("Restore this", f"rr|{n}|{rel_id}")])
+    return "\n".join(out), kbd(*rows)
 
-def cmd_doctor(args, _aw, **_) -> str:
+# ---------------------------------------------------------------------------
+# /doctor, /explain, /events, /logs
+# ---------------------------------------------------------------------------
+
+def cmd_doctor(args, _aw, **_) -> Response:
     n, err = _one_name(args)
     if err: return err
     rc, raw = run_nelly("doctor", n)
@@ -581,17 +776,23 @@ def cmd_doctor(args, _aw, **_) -> str:
     clean = clean.replace("  ✓ ", "  [OK]   ")
     clean = clean.replace("  ! ", "  [WARN] ")
     clean = clean.replace("  ✗ ", "  [FAIL] ")
-    return f"{b(f'{n} - pre-flight check')}\n{pre(clean.rstrip() or '(no output)')}"
+    return (
+        f"{b(f'{n} - pre-flight check')}\n{pre(clean.rstrip() or '(no output)')}",
+        kbd([("Status", f"s|{n}"), ("Refresh", f"d|{n}")]),
+    )
 
-def cmd_explain(args, _aw, **_) -> str:
+def cmd_explain(args, _aw, **_) -> Response:
     n, err = _one_name(args)
     if err: return err
     rc, raw = run_nelly("explain", n)
     clean = re.sub(r"\x1b\[[0-9;]*m", "", raw or "").rstrip()
     if rc != 0: return fmt_err(rc, clean)
-    return f"{b(f'{n} - summary')}\n{pre(clean or '(no output)')}"
+    return (
+        f"{b(f'{n} - summary')}\n{pre(clean or '(no output)')}",
+        kbd([("Status", f"s|{n}")]),
+    )
 
-def cmd_events(args, _aw, **_) -> str:
+def cmd_events(args, _aw, **_) -> Response:
     n, err = _one_name(args)
     if err: return err
     container = subprocess.run(
@@ -604,27 +805,27 @@ def cmd_events(args, _aw, **_) -> str:
         out = subprocess.check_output(
             ["docker", "events", "--since", "1h", "--until", "0s",
              "--filter", f"container={container}",
-             # Compact format: "HH:MM:SS  action"
              "--format", "{{.TimeNano}}|{{.Action}}"],
             timeout=15
         ).decode("utf-8", errors="replace")
     except Exception as e:
         return f"docker events failed: {esc(e)}"
-    # Reformat nano timestamps to HH:MM and trim actions to 20 chars
     lines = []
     for raw_line in out.splitlines():
         if "|" not in raw_line: continue
         ts_ns, action = raw_line.split("|", 1)
         try:
-            import datetime
             t = datetime.datetime.utcfromtimestamp(int(ts_ns) / 1e9).strftime("%H:%M:%S")
         except Exception:
             t = "??:??:??"
         lines.append(f"{t}  {trunc(action, 26)}")
     body = "\n".join(lines) or "(no events)"
-    return f"{b(f'{n} - events (last hr)')}\n{pre(body)}"
+    return (
+        f"{b(f'{n} - events (last hr)')}\n{pre(body)}",
+        kbd([("Status", f"s|{n}")]),
+    )
 
-def cmd_logs(args, _aw, **_) -> str:
+def cmd_logs(args, _aw, **_) -> Response:
     n, err = _one_name(args)
     if err: return err
     log_path = NELLY_ROOT / "containers" / n / "logs" / "cron"
@@ -638,7 +839,10 @@ def cmd_logs(args, _aw, **_) -> str:
             tail = subprocess.check_output(["tail", "-n", "20", str(f)], timeout=5).decode("utf-8", errors="replace")
         except Exception as e:
             return f"failed to tail log: {esc(e)}"
-        return f"{b(f'{n} / {app}')}\n{pre(tail.rstrip() or '(empty)')}"
+        return (
+            f"{b(f'{n} / {app}')}\n{pre(tail.rstrip() or '(empty)')}",
+            kbd([("Status", f"s|{n}"), ("Refresh", f"lg|{n}|{app}")]),
+        )
 
     if not log_path.is_dir():
         return f"no logs yet for {esc(n)}"
@@ -653,29 +857,40 @@ def cmd_logs(args, _aw, **_) -> str:
         chunks.append(section(f.stem, tail.rstrip()))
     if not chunks:
         return f"no log lines yet for {esc(n)}"
-    return f"{b(n)}\n\n" + "\n\n".join(chunks)
+    return (
+        f"{b(n)}\n\n" + "\n\n".join(chunks),
+        kbd([("Status", f"s|{n}"), ("Refresh", f"lg|{n}")]),
+    )
 
-# ---- write commands -------------------------------------------------------
+# ---------------------------------------------------------------------------
+# write commands
+# ---------------------------------------------------------------------------
 
-def cmd_start_dep(args, _aw, **_) -> str:
+def cmd_start_dep(args, _aw, **_) -> Response:
     n, err = _one_name(args)
     if err: return err
     rc, raw = run_nelly("start", n)
-    return f"{b(n)} started" if rc == 0 else fmt_err(rc, raw)
+    if rc == 0:
+        return f"{b(n)} started", kbd([("Status", f"s|{n}")])
+    return fmt_err(rc, raw)
 
-def cmd_stop_dep(args, _aw, **_) -> str:
+def cmd_stop_dep(args, _aw, **_) -> Response:
     n, err = _one_name(args)
     if err: return err
     rc, raw = run_nelly("stop", n)
-    return f"{b(n)} stopped" if rc == 0 else fmt_err(rc, raw)
+    if rc == 0:
+        return f"{b(n)} stopped", kbd([("Start", f"sa|{n}"), ("Status", f"s|{n}")])
+    return fmt_err(rc, raw)
 
-def cmd_restart_dep(args, _aw, **_) -> str:
+def cmd_restart_dep(args, _aw, **_) -> Response:
     n, err = _one_name(args)
     if err: return err
     rc, raw = run_nelly("restart", n)
-    return f"{b(n)} restarted" if rc == 0 else fmt_err(rc, raw)
+    if rc == 0:
+        return f"{b(n)} restarted", kbd([("Status", f"s|{n}")])
+    return fmt_err(rc, raw)
 
-def cmd_runnow(args, _aw, **_) -> str:
+def cmd_runnow(args, _aw, **_) -> Response:
     if len(args) < 2:
         return "usage: /runnow &lt;name&gt; &lt;app&gt;"
     n = safe_name(args[0])
@@ -684,27 +899,36 @@ def cmd_runnow(args, _aw, **_) -> str:
     rc, raw = run_nelly("run-now", n, a)
     tail = (raw or "(no output)").rstrip()[-1500:]
     if rc == 0:
-        return f"{b(f'{n} / {a}')}  ran\n{pre(tail)}"
+        return (
+            f"{b(f'{n} / {a}')}  ran\n{pre(tail)}",
+            kbd([("Logs", f"lg|{n}|{a}"), ("Status", f"s|{n}")]),
+        )
     return fmt_err(rc, raw)
 
-def cmd_deploy(args, _aw, **_) -> str:
+def cmd_deploy(args, allow_writes, **_) -> Response:
     n, err = _one_name(args)
     if err: return err
     rc, raw = run_nelly("deploy", n, "--wait-healthy", "60", "--auto-rollback")
     tail = "\n".join((raw or "").splitlines()[-15:]).rstrip() or "(no output)"
     label = f"{n}  deploy {'OK' if rc == 0 else 'FAILED (exit ' + str(rc) + ')'}"
-    return f"{b(label)}\n{pre(tail)}"
+    rows = [[("Status", f"s|{n}"), ("Releases", f"rs|{n}")]]
+    if rc != 0 and allow_writes:
+        rows.append([("Logs", f"lg|{n}"), ("Doctor", f"d|{n}")])
+    return f"{b(label)}\n{pre(tail)}", kbd(*rows)
 
-def cmd_rollback(args, _aw, **_) -> str:
+def cmd_rollback(args, _aw, **_) -> Response:
     n, err = _one_name(args)
     if err: return err
     rc, raw = run_nelly("rollback", n)
     tail = (raw or "").rstrip()[-1500:] or "(no output)"
     if rc == 0:
-        return f"{b(n)} rolled back\n{pre(tail)}"
+        return (
+            f"{b(n)} rolled back\n{pre(tail)}",
+            kbd([("Status", f"s|{n}"), ("Releases", f"rs|{n}")]),
+        )
     return fmt_err(rc, raw)
 
-def cmd_release_restore(args, _aw, **_) -> str:
+def cmd_release_restore(args, _aw, **_) -> Response:
     if len(args) < 2:
         return "usage: /release_restore &lt;name&gt; &lt;rel_id&gt;"
     n = safe_name(args[0])
@@ -714,36 +938,68 @@ def cmd_release_restore(args, _aw, **_) -> str:
     rc, raw = run_nelly("release", "restore", n, args[1])
     tail = "\n".join((raw or "").splitlines()[-10:]).rstrip() or "(no output)"
     if rc == 0:
-        return f"{b(n)} restored to {code(args[1])}\n{pre(tail)}"
+        return (
+            f"{b(n)} restored to {code(args[1])}\n{pre(tail)}",
+            kbd([("Status", f"s|{n}"), ("Releases", f"rs|{n}")]),
+        )
     return fmt_err(rc, raw)
 
-# ---- command table --------------------------------------------------------
+# ---------------------------------------------------------------------------
+# command table
+# ---------------------------------------------------------------------------
+
+# Two indexes: long names (typed in chat) and short opcodes (callback_data).
+# Same handler under each — the table is the only allow-list for both paths.
 
 COMMANDS: dict[str, tuple[Callable, bool]] = {
-    "help":        (cmd_help, False),
-    "start":       (cmd_help, False),
-    "id":          (cmd_id,    False),
-    "list":        (cmd_list,  False),
-    "ls":          (cmd_list,  False),
-    "ps":          (cmd_ps,    False),
-    "stats":       (cmd_stats, False),
-    "status":      (cmd_status,False),
-    "logs":        (cmd_logs,  False),
-    "cron":        (cmd_cron,  False),
-    "explain":     (cmd_explain,False),
-    "doctor":      (cmd_doctor,False),
-    "events":      (cmd_events,False),
-    "releases":    (cmd_releases, False),
-    "release":     (cmd_release,  False),
-    "metrics":     (cmd_metrics,  False),
-    "start_dep":      (cmd_start_dep,    True),
-    "stop_dep":       (cmd_stop_dep,     True),
-    "restart_dep":    (cmd_restart_dep,  True),
-    "runnow":         (cmd_runnow,       True),
-    "deploy":         (cmd_deploy,       True),
-    "rollback":       (cmd_rollback,     True),
-    "release_restore":(cmd_release_restore, True),
+    "help":        (cmd_help,    False),
+    "start":       (cmd_start,   False),  # /start is dashboard, not help
+    "id":          (cmd_id,      False),
+    "list":        (cmd_list,    False),
+    "ls":          (cmd_list,    False),
+    "ps":          (cmd_ps,      False),
+    "stats":       (cmd_stats,   False),
+    "status":      (cmd_status,  False),
+    "logs":        (cmd_logs,    False),
+    "cron":        (cmd_cron,    False),
+    "explain":     (cmd_explain, False),
+    "doctor":      (cmd_doctor,  False),
+    "events":      (cmd_events,  False),
+    "releases":    (cmd_releases,False),
+    "release":     (cmd_release, False),
+    "metrics":     (cmd_metrics, False),
+    "start_dep":      (cmd_start_dep,      True),
+    "stop_dep":       (cmd_stop_dep,       True),
+    "restart_dep":    (cmd_restart_dep,    True),
+    "runnow":         (cmd_runnow,         True),
+    "deploy":         (cmd_deploy,         True),
+    "rollback":       (cmd_rollback,       True),
+    "release_restore":(cmd_release_restore,True),
 }
+
+# Short opcodes used in callback_data (so the 64-byte budget isn't blown).
+CB_ALIASES: dict[str, str] = {
+    "s":  "status",
+    "ls": "list",
+    "lg": "logs",
+    "m":  "metrics",
+    "c":  "cron",
+    "rs": "releases",
+    "r":  "release",
+    "d":  "doctor",
+    "e":  "explain",
+    "ev": "events",
+    "re": "restart_dep",
+    "st": "stop_dep",
+    "sa": "start_dep",
+    "dp": "deploy",
+    "rb": "rollback",
+    "rr": "release_restore",
+    "rn": "runnow",
+}
+
+def resolve_cmd(token_str: str) -> str:
+    return CB_ALIASES.get(token_str, token_str)
 
 # ---------------------------------------------------------------------------
 # rate limiting
@@ -774,11 +1030,24 @@ def _shutdown(*_):
 signal.signal(signal.SIGINT,  _shutdown)
 signal.signal(signal.SIGTERM, _shutdown)
 
-def handle_update(token: str, cfg: dict, update: dict) -> None:
-    msg = update.get("message") or update.get("edited_message")
-    if not msg:
-        return
-    user = msg.get("from") or {}
+def _dispatch(cfg: dict, cmd_raw: str, args: list[str], user_id: int) -> str | None:
+    """Returns the rendered reply, or None if the caller should be silenced."""
+    cmd_name = resolve_cmd(cmd_raw)
+    entry = COMMANDS.get(cmd_name)
+    if not entry:
+        return f"unknown command: {code('/' + cmd_raw)}  try {code('/help')}"
+    handler, needs_writes = entry
+    if needs_writes and not cfg.get("allow_writes", False):
+        return f"{b('writes disabled')}  set {code('allow_writes: true')} in {code('bot/config.json')}"
+    try:
+        resp = handler(args, cfg.get("allow_writes", False), user_id=user_id)
+    except Exception as e:
+        log.exception("handler crashed: %s", e)
+        resp = f"{b('internal error')}\n{pre(str(e))}"
+    return resp
+
+def handle_message(token: str, cfg: dict, msg: dict) -> None:
+    user    = msg.get("from") or {}
     user_id = user.get("id")
     chat_id = (msg.get("chat") or {}).get("id")
     text    = msg.get("text") or ""
@@ -787,9 +1056,7 @@ def handle_update(token: str, cfg: dict, update: dict) -> None:
         log.warning("DENIED user=%s username=%s text=%r",
                     user_id, user.get("username"), text[:120])
         return
-
     if rate_limited(user_id):
-        log.warning("RATE-LIMITED user=%s", user_id)
         send_message(token, chat_id, f"{b('rate limit')}  please slow down")
         return
 
@@ -798,28 +1065,50 @@ def handle_update(token: str, cfg: dict, update: dict) -> None:
         return
     cmd_raw = parts[0][1:].lower().split("@", 1)[0]
     args = parts[1:]
+    log.info("MSG user=%s cmd=%s args=%s", user_id, cmd_raw, args)
 
-    handler_entry = COMMANDS.get(cmd_raw)
-    if not handler_entry:
-        log.info("UNKNOWN user=%s cmd=%s", user_id, cmd_raw)
-        send_message(token, chat_id, f"unknown command: {code('/' + cmd_raw)}  try {code('/help')}")
+    resp = _dispatch(cfg, cmd_raw, args, user_id)
+    if not resp: return
+    text_out, keyboard = _split_resp(resp)
+    send_message(token, chat_id, text_out, keyboard=keyboard)
+
+def handle_callback(token: str, cfg: dict, cb: dict) -> None:
+    cb_id    = cb.get("id", "")
+    data     = cb.get("data", "") or ""
+    user     = cb.get("from") or {}
+    user_id  = user.get("id")
+    msg      = cb.get("message") or {}
+    chat_id  = (msg.get("chat") or {}).get("id")
+
+    if user_id not in cfg["allowed_users"]:
+        log.warning("DENIED-CB user=%s username=%s data=%r",
+                    user_id, user.get("username"), data[:120])
+        answer_callback(token, cb_id, "not authorized")
         return
-    handler, needs_writes = handler_entry
-    if needs_writes and not cfg.get("allow_writes", False):
-        log.info("WRITES-DISABLED user=%s cmd=%s", user_id, cmd_raw)
-        send_message(token, chat_id,
-            f"{b('writes disabled')}  set {code('allow_writes: true')} in {code('bot/config.json')}")
+    if rate_limited(user_id):
+        answer_callback(token, cb_id, "rate limit")
         return
 
-    log.info("RUN user=%s cmd=%s args=%s", user_id, cmd_raw, args)
-    try:
-        reply = handler(args, cfg.get("allow_writes", False), user_id=user_id)
-    except Exception as e:
-        log.exception("handler crashed: %s", e)
-        reply = f"{b('internal error')}\n{pre(str(e))}"
+    # Always acknowledge to dismiss the loading spinner.
+    answer_callback(token, cb_id)
 
-    if reply:
-        send_message(token, chat_id, reply)
+    parts = data.split("|")
+    cmd_raw = parts[0]
+    args = parts[1:]
+    log.info("CB user=%s cmd=%s args=%s", user_id, cmd_raw, args)
+
+    resp = _dispatch(cfg, cmd_raw, args, user_id)
+    if not resp: return
+    text_out, keyboard = _split_resp(resp)
+    send_message(token, chat_id, text_out, keyboard=keyboard)
+
+def handle_update(token: str, cfg: dict, update: dict) -> None:
+    if "callback_query" in update:
+        handle_callback(token, cfg, update["callback_query"])
+        return
+    msg = update.get("message") or update.get("edited_message")
+    if msg:
+        handle_message(token, cfg, msg)
 
 def main() -> None:
     cfg = load_config()
@@ -838,7 +1127,7 @@ def main() -> None:
             cfg = load_config()
             resp = tg(token, "getUpdates",
                       offset=offset, timeout=POLL_TIMEOUT,
-                      allowed_updates=json.dumps(["message"]))
+                      allowed_updates=json.dumps(["message", "callback_query"]))
             if not resp.get("ok"):
                 log.warning("getUpdates returned !ok: %s", resp)
                 time.sleep(2)
