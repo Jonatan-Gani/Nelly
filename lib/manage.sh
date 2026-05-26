@@ -117,24 +117,33 @@ case "$sub" in
         ep="$(jq -r --arg n "$APP" '.apps[] | select(.app_name==$n) | .entrypoint // empty' \
               "$DEPLOY_DIR/def/config.json")"
         [[ -n "$ep" ]] || die "app $APP has no entrypoint in config.json"
-        # Defense-in-depth: even though validate_config restricts the
-        # characters allowed in entrypoint + app name, re-check here so this
-        # code path stays safe if something edits config.json in-flight.
+        # Defense-in-depth: validate_config already restricts these, but
+        # re-check so this code path stays safe if config.json is edited
+        # between validate and run.
         [[ "$ep" =~ ^[A-Za-z0-9_./-]+$ && "$ep" != /* && "$ep" != *..* ]] \
             || die "entrypoint '$ep' contains unsafe characters; refusing to run"
         [[ "$APP" =~ ^[A-Za-z0-9_-]+$ ]] \
             || die "invalid app name; refusing to run"
         info "running $APP/$ep in $CN"
-        # Source the same global + per-app secrets that nelly-run sources for
-        # cron-fired runs, so run-now behaves the same as a real cron tick.
-        # Values are validated, so this shell wrap is safe.
-        docker exec -w "/home/apps/$APP" "$CN" /bin/bash -c "
-            set -a
-            [ -f /etc/nelly/global.env ]            && . /etc/nelly/global.env
-            [ -f /etc/nelly/secrets/$APP.env ]      && . /etc/nelly/secrets/$APP.env
-            set +a
-            exec /opt/venvs/$APP/bin/python /home/apps/$APP/$ep
-        "
+
+        # Route through the in-container nelly-run wrapper so behavior is
+        # identical to a cron-fired invocation: per-app + global secrets
+        # sourced, output appended to /var/log/nelly/<app>.log, metrics
+        # entry appended to <app>.metrics.jsonl, log files rotated at the
+        # configured size.
+        log_path="/var/log/nelly/$APP.log"
+        # Note size of the log before so we can tail just the new bytes
+        # back to the user's terminal (stdout). `stat -c %s` is in procps.
+        pre_size="$(docker exec "$CN" stat -c %s "$log_path" 2>/dev/null || echo 0)"
+        rc=0
+        docker exec "$CN" /usr/local/bin/nelly-run "$APP" "$ep" || rc=$?
+        post_size="$(docker exec "$CN" stat -c %s "$log_path" 2>/dev/null || echo 0)"
+        # Show what got appended this run.
+        if (( post_size > pre_size )); then
+            new_bytes=$((post_size - pre_size))
+            docker exec "$CN" tail -c "$new_bytes" "$log_path"
+        fi
+        exit $rc
         ;;
 
     top)
