@@ -41,9 +41,15 @@ SRC_DIR="$(mktemp -d)"
 
 cleanup() {
     # Best-effort cleanup of everything we created.
-    bin/nelly stop "$NAME" >/dev/null 2>&1 || true
-    docker ps -a --format '{{.Names}}' | grep -qx "$NAME" \
-        && docker rm -f "$NAME" >/dev/null 2>&1 || true
+    # The container writes log + metrics files into the bind-mounted
+    # logs/cron dir as root. From the host (non-root) we can still
+    # `rm -rf` them because the parent dir is owned by us — but if the
+    # container is still up, clear the root-owned files from inside
+    # the container first to be safe.
+    if docker ps -a --format '{{.Names}}' | grep -qx "$NAME"; then
+        docker exec "$NAME" sh -c 'rm -rf /var/log/nelly/* 2>/dev/null' || true
+        docker rm -f "$NAME" >/dev/null 2>&1 || true
+    fi
     docker images "$NAME" -q 2>/dev/null | xargs -r docker image rm -f >/dev/null 2>&1 || true
     rm -rf "$DEPLOY_DIR" "$SRC_DIR"
 }
@@ -126,16 +132,22 @@ fi
 # isn't enough. Verify the cron-style path (nelly-run sourced inside the
 # container) ALSO sees both secret scopes. This catches the bug where
 # global secrets reach run-now but not the actual cron-fired runs.
-echo > "$LOG_FILE"   # clear so we can detect the new line cleanly
+#
+# The log file is owned by root (the container writes as root via the
+# bind-mount), so we can't truncate it from the host. Instead, snapshot
+# its line count, run the wrapper, then read just the new tail.
+prev_lines=$(wc -l < "$LOG_FILE" 2>/dev/null | tr -d ' ' || echo 0)
 docker exec "$NAME" /usr/local/bin/nelly-run hi hi.py
 sleep 1
-if grep -q 'hello from e2e' "$LOG_FILE"; then
+new_block="$(tail -n +$((prev_lines + 1)) "$LOG_FILE" 2>/dev/null || echo '')"
+
+if echo "$new_block" | grep -q 'hello from e2e'; then
     pass "[cron-style] global secret reached cron-fired script"
 else
-    fail "[cron-style] global secret missing from cron-fired script (cat $LOG_FILE)"
-    cat "$LOG_FILE"
+    fail "[cron-style] global secret missing from cron-fired script"
+    printf 'new lines were:\n%s\n' "$new_block"
 fi
-if grep -q 'APP_TOKEN=abc123' "$LOG_FILE"; then
+if echo "$new_block" | grep -q 'APP_TOKEN=abc123'; then
     pass "[cron-style] per-app secret reached cron-fired script"
 else
     fail "[cron-style] per-app secret missing from cron-fired script"
