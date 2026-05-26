@@ -305,17 +305,46 @@ across logouts.
 
 ## Updating Nelly
 
+One command:
+
+```sh
+nelly update
+```
+
+That does the whole thing:
+
+1. `git fetch` and shows you what's new (commits + changed files).
+2. `git pull --ff-only` (refuses to mangle anything if it can't fast-forward).
+3. Runs `tests/smoke.sh` as a sanity check — if it fails, the update aborts
+   with the SHA to revert to.
+4. Restarts the Telegram bot daemon if `lib/bot.*` changed and the bot is running.
+5. Redeploys every deployment if image-affecting files changed
+   (`lib/build.sh`, `lib/source.sh`, or the template `Dockerfile`).
+6. Otherwise re-runs every container if runtime files changed
+   (`lib/run.sh`, `lib/manage.sh`, `lib/hooks.sh`, `lib/secrets.sh`).
+
+Steps 4-6 prompt before acting. Skip the prompts with `-y`:
+
+```sh
+nelly -y update               # do everything without asking
+nelly update --check          # show what would happen, change nothing
+```
+
+If you'd rather drive each step manually:
+
 ```sh
 cd ~/nelly
 git pull
-bash tests/smoke.sh         # confirm nothing regressed
+bash tests/smoke.sh
+systemctl --user restart nelly-bot                       # if bot installed
+nelly deploy <name> --wait-healthy 60 --auto-rollback    # per deployment
 ```
 
-That's it. Nelly is a stateless CLI — there's no migration step. Per-deployment
+Nelly is a stateless CLI — there's no migration step. Per-deployment
 state lives under `containers/<name>/`; bot state lives under `bot/`;
-neither is touched by `git pull`.
+neither is touched by `git pull` or `nelly update`.
 
-If you want to verify against a real Docker daemon:
+If you want to verify against a real Docker daemon after updating:
 ```sh
 bash tests/e2e.sh           # full pipeline test, ~3-5 min
 ```

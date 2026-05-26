@@ -57,6 +57,9 @@ $(_bold "Across many deployments")
 $(_bold "Monitor from your phone")
   $(_bold "nelly bot setup")            $(_dim "# wire up a Telegram bot (allow-listed users only)")
 
+$(_bold "Stay current")
+  $(_bold "nelly update")               $(_dim "# pull latest, smoke-test, restart bot + redeploy as needed")
+
 $(_bold "Prefer to edit config.json directly?") That's also fine — config is the source of truth.
   $(_bold "nelly edit    <name>")       $(_dim "# opens \$EDITOR; validates on save")
   $(_bold "nelly plan    <name>")       $(_dim "# show what deploy will do, no side effects")
@@ -176,6 +179,10 @@ $(_bold "TELEGRAM BOT")  $(_dim "(secure remote monitoring + lifecycle from your
   bot test                              Send a "hello" to confirm wiring
   bot allow|revoke <user_id>            Manage the allowed-users list
   bot install-systemd                   Install a user systemd unit
+
+$(_bold "MAINTENANCE")
+  update          [--check]             Pull latest Nelly, smoke-test, restart bot + redeploy
+                                         as needed (one command for the whole upgrade)
 
 $(_bold "GLOBAL FLAGS")
   --json                   machine-readable output where supported
@@ -320,6 +327,31 @@ $(_bold "nelly rollback <name>")
 EOF
             ;;
 
+        update) cat <<EOF
+$(_bold "nelly update [--check]")
+
+One-shot upgrade of Nelly itself. Does, in order:
+
+   1. git fetch + show new commits / changed files
+   2. git pull (--ff-only — fails clean if it can't fast-forward)
+   3. run tests/smoke.sh as a sanity check; abort if it fails, with
+      instructions to revert
+   4. restart the Telegram bot daemon if lib/bot.* changed AND
+      the systemd user unit is currently active
+   5. redeploy every deployment if lib/build.sh / source.sh / the
+      template Dockerfile changed (these affect image content)
+   6. otherwise re-run every container if lib/run.sh / manage.sh /
+      hooks.sh / secrets.sh changed (no rebuild needed)
+
+Steps 4-6 prompt before acting; pass -y to skip the prompts. --check
+prints what would happen without applying anything.
+
+Examples:
+   $(_bold 'nelly update')              # interactive (prompts before each step)
+   $(_bold 'nelly -y update')           # do everything without asking
+   $(_bold 'nelly update --check')      # show plan, change nothing
+EOF
+            ;;
         bot) cat <<EOF
 $(_bold "nelly bot <sub> ...")
 
@@ -688,6 +720,10 @@ case "$cmd" in
     # ---- Telegram bot --------------------------------------------------
     bot)
         "$LIB/bot.sh" "$@" ;;
+
+    # ---- maintenance ---------------------------------------------------
+    update)
+        "$LIB/update.sh" "$@" ;;
 
     *)
         err "unknown command: $cmd"
