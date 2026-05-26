@@ -28,9 +28,22 @@ pass()    { printf '  \033[32mok\033[0m  %s\n' "$*"; }
 fail()    { printf '  \033[31mFAIL\033[0m %s\n' "$*"; FAIL=$((FAIL+1)); }
 section() { printf '\n== %s ==\n' "$*"; }
 
+# If the user already has a real bot/ directory (a live install), move it
+# aside up front so the bot tests below — which write a throwaway bot/ — can't
+# clobber it. The cleanup trap puts it back on exit (success or failure).
+BOT_BACKUP=""
+if [[ -d bot ]]; then
+    BOT_BACKUP="/tmp/nelly-smoke-orig-bot.$$"
+    mv bot "$BOT_BACKUP"
+fi
+
 cleanup() {
     rm -rf containers/smoketest-* /tmp/nelly-smoke-*.json /tmp/nelly-smoke-*.tar.gz 2>/dev/null || true
     rm -rf bot 2>/dev/null || true
+    # Restore the user's real bot/ if we moved it aside.
+    if [[ -n "$BOT_BACKUP" && -d "$BOT_BACKUP" ]]; then
+        mv "$BOT_BACKUP" bot
+    fi
 }
 trap cleanup EXIT
 
