@@ -28,6 +28,8 @@ Security model
 - Commands are dispatched via a hard-coded allow-list mapping each
   command to (handler, allow_when_read_only). Write commands and write
   button taps are both gated behind config.allow_writes.
+- Destructive button taps (stop / restart / deploy / restore) require a
+  second confirming tap; typed write commands run immediately.
 - Callback data carries a short opcode + validated args; the same
   COMMANDS table is used for text and button-driven invocation, so
   there's no separate "secret" code path.
@@ -216,6 +218,17 @@ def trunc(s: str, n: int) -> str:
     s = str(s)
     return s if len(s) <= n else s[: max(0, n - 3)] + "..."
 
+def state_marker(state: str) -> str:
+    """Text status marker (no emoji) for a deployment state."""
+    return {
+        "running":    "[OK]",
+        "unhealthy":  "[WARN]",
+        "restarting": "[WARN]",
+        "exited":     "[FAIL]",
+        "dead":       "[FAIL]",
+        "absent":     "[OFF]",
+    }.get(state, "[??]")
+
 # ---------------------------------------------------------------------------
 # layout primitives
 # ---------------------------------------------------------------------------
@@ -281,21 +294,18 @@ def kbd(*rows: list[tuple[str, str]]) -> list[list[dict]]:
 # Button rows we reuse across commands.
 
 def kbd_for_deployment(n: str, allow_writes: bool) -> list[list[tuple[str, str]]]:
-    """The standard action row for a single deployment."""
+    """The standard action keyboard for a single deployment, 2 buttons wide.
+    Destructive actions route through a confirmation step (cf|<op>|...)."""
     rows = [
-        [("Logs",     f"lg|{n}"),
-         ("Metrics",  f"m|{n}"),
-         ("Cron",     f"c|{n}")],
-        [("Releases", f"rs|{n}"),
-         ("Doctor",   f"d|{n}"),
-         ("Refresh",  f"s|{n}")],
+        [("Logs",     f"lg|{n}"), ("Metrics",  f"m|{n}")],
+        [("Cron",     f"c|{n}"),  ("Releases", f"rs|{n}")],
+        [("Doctor",   f"d|{n}"),  ("Refresh",  f"s|{n}")],
     ]
     if allow_writes:
-        rows.append([
-            ("Restart", f"re|{n}"),
-            ("Stop",    f"st|{n}"),
-            ("Deploy",  f"dp|{n}"),
-        ])
+        rows += [
+            [("Restart", f"cf|re|{n}"), ("Stop", f"cf|st|{n}")],
+            [("Deploy",  f"cf|dp|{n}")],
+        ]
     return rows
 
 # ---------------------------------------------------------------------------
@@ -362,8 +372,11 @@ def _latest_release_info(deployment: str) -> tuple[str, str, str] | None:
     except Exception:
         return None
 
+_SEVERITY = {"exited": 0, "dead": 0, "unhealthy": 1, "restarting": 1, "absent": 2, "running": 3}
+
 def cmd_start(_args, allow_writes, **_) -> Response:
-    """First-touch view: counts + per-deployment one-liner + quick buttons."""
+    """First-touch view: health verdict + per-deployment one-liner + buttons.
+    Deployments are ordered worst-first so problems sit at the top."""
     rc, raw = run_nelly("list", json_output=True)
     items: list[dict] = []
     if rc == 0:
@@ -371,6 +384,7 @@ def cmd_start(_args, allow_writes, **_) -> Response:
             items = json.loads(raw)
         except Exception:
             items = []
+    items.sort(key=lambda d: (_SEVERITY.get(d.get("state", ""), 2), d.get("deployment", "")))
 
     n_total      = len(items)
     n_running    = sum(1 for d in items if d.get("state") == "running")
@@ -378,7 +392,21 @@ def cmd_start(_args, allow_writes, **_) -> Response:
     n_failed     = sum(1 for d in items if d.get("state") in ("exited", "dead"))
     n_absent     = sum(1 for d in items if d.get("state") == "absent")
 
-    out = [b(f"Nelly — {HOST_NAME}"), ""]
+    out = [b(f"Nelly — {HOST_NAME}")]
+
+    if n_total:
+        if n_failed or n_unhealthy:
+            bits = []
+            if n_failed:    bits.append(f"{n_failed} failed")
+            if n_unhealthy: bits.append(f"{n_unhealthy} unhealthy")
+            verdict = "[WARN] " + ", ".join(bits)
+        elif n_absent:
+            verdict = f"[OFF] {n_absent} not deployed"
+        else:
+            verdict = "[OK] all running"
+        out += [b(verdict), ""]
+    else:
+        out.append("")
 
     out.append(section("Summary", kv([
         ("deployments", n_total),
@@ -391,29 +419,27 @@ def cmd_start(_args, allow_writes, **_) -> Response:
     if items:
         deploy_blocks = []
         for d in items:
-            name  = trunc(d.get("deployment", "?"), 22)
+            dep   = d.get("deployment", "?")
             state = d.get("state", "?")
-            line1 = f"{name}  ({state})"
-            rel = _latest_release_info(d.get("deployment", ""))
+            line1 = f"{state_marker(state)} {trunc(dep, 16)}  ({state})"
+            rel = _latest_release_info(dep)
             if rel:
                 rel_id, outcome, age = rel
-                deploy_blocks.append(
-                    f"{line1}\n  last: {rel_id} {outcome}  {age}"
-                )
+                deploy_blocks.append(f"{line1}\n  last: {rel_id} {outcome}  {age}")
             else:
                 deploy_blocks.append(line1)
         out += ["", section("Deployments", "\n\n".join(deploy_blocks))]
     else:
         out += ["", i_("no deployments yet — run `nelly init <name>` on the host")]
 
-    # Build keyboard: one button per deployment (up to 9), in rows of 3.
+    # Buttons: one per deployment (up to 8), 2 wide, worst-first order.
     kbd_rows: list[list[tuple[str, str]]] = []
     row: list[tuple[str, str]] = []
-    for d in items[:9]:
+    for d in items[:8]:
         name = d.get("deployment", "")
         if not name: continue
-        row.append((trunc(name, 14), f"s|{name}"))
-        if len(row) == 3:
+        row.append((trunc(name, 16), f"s|{name}"))
+        if len(row) == 2:
             kbd_rows.append(row); row = []
     if row: kbd_rows.append(row)
     kbd_rows.append([("Refresh", "start"), ("Help", "help")])
@@ -485,14 +511,14 @@ def cmd_list(_args, allow_writes, **_) -> Response:
         ))
     text = section("Deployments", "\n\n".join(cards))
 
-    # Buttons: one per deployment, up to 9, rows of 3.
+    # Buttons: one per deployment (up to 8), 2 wide.
     rows: list[list[tuple[str, str]]] = []
     row: list[tuple[str, str]] = []
-    for d in items[:9]:
+    for d in items[:8]:
         name = d.get("deployment", "")
         if not name: continue
-        row.append((trunc(name, 14), f"s|{name}"))
-        if len(row) == 3:
+        row.append((trunc(name, 16), f"s|{name}"))
+        if len(row) == 2:
             rows.append(row); row = []
     if row: rows.append(row)
     rows.append([("Dashboard", "start"), ("Refresh", "ls")])
@@ -634,7 +660,8 @@ def cmd_cron(args, _aw, **_) -> Response:
             pairs.append(("next", nxt))
         cards.append(card(trunc(it.get("app", "?"), 22), pairs))
     return section(f"{n} - schedules", "\n\n".join(cards)), kbd(
-        [("Status", f"s|{n}"), ("Metrics", f"m|{n}"), ("Refresh", f"c|{n}")],
+        [("Status", f"s|{n}"), ("Metrics", f"m|{n}")],
+        [("Refresh", f"c|{n}")],
     )
 
 def cmd_metrics(args, _aw, **_) -> Response:
@@ -677,7 +704,8 @@ def cmd_metrics(args, _aw, **_) -> Response:
         body = "\n".join([title, "  " + line_counts, "  " + line_dur, "  " + line_last])
         cards.append(body)
     return section(f"{n} - metrics{label}", "\n\n".join(cards)), kbd(
-        [("Status", f"s|{n}"), ("24h", f"m|{n}|24h"), ("Refresh", f"m|{n}")],
+        [("Status", f"s|{n}"), ("24h", f"m|{n}|24h")],
+        [("Refresh", f"m|{n}")],
     )
 
 # ---------------------------------------------------------------------------
@@ -761,7 +789,7 @@ def cmd_release(args, allow_writes, **_) -> Response:
 
     rows = [[("All releases", f"rs|{n}"), ("Status", f"s|{n}")]]
     if allow_writes:
-        rows.append([("Restore this", f"rr|{n}|{rel_id}")])
+        rows.append([("Restore this", f"cf|rr|{n}|{rel_id}")])
     return "\n".join(out), kbd(*rows)
 
 # ---------------------------------------------------------------------------
@@ -945,6 +973,39 @@ def cmd_release_restore(args, _aw, **_) -> Response:
     return fmt_err(rc, raw)
 
 # ---------------------------------------------------------------------------
+# confirmation guard for destructive button taps
+# ---------------------------------------------------------------------------
+
+# Opcodes that must not fire on a single tap. The keyboard offers
+# "cf|<op>|<args>"; cmd_confirm renders a Yes/Cancel prompt whose Yes button
+# carries the real "<op>|<args>" callback. Typed write commands are
+# deliberate and skip this — only button taps are guarded.
+CONFIRM_VERB: dict[str, str] = {
+    "re": "restart",
+    "st": "stop",
+    "dp": "deploy",
+    "rr": "restore",
+}
+
+def cmd_confirm(args, _aw, **_) -> Response:
+    if not args:
+        return b("nothing to confirm")
+    op, op_args = args[0], args[1:]
+    verb = CONFIRM_VERB.get(op)
+    if not verb:
+        return b("unknown action")
+    name = op_args[0] if op_args else "?"
+    detail = f"{verb}  {name}"
+    if op == "rr" and len(op_args) >= 2:
+        detail += f"\nto  {op_args[1]}"
+    yes_data    = "|".join([op, *op_args])
+    cancel_data = f"s|{name}" if safe_name(name) else "start"
+    out = [b("Confirm"), "", pre(detail)]
+    return "\n".join(out), kbd(
+        [("Cancel", cancel_data), (f"Yes, {verb}", yes_data)],
+    )
+
+# ---------------------------------------------------------------------------
 # command table
 # ---------------------------------------------------------------------------
 
@@ -954,6 +1015,7 @@ def cmd_release_restore(args, _aw, **_) -> Response:
 COMMANDS: dict[str, tuple[Callable, bool]] = {
     "help":        (cmd_help,    False),
     "start":       (cmd_start,   False),  # /start is dashboard, not help
+    "confirm":     (cmd_confirm, False),  # two-tap guard; only reached via cf| buttons
     "id":          (cmd_id,      False),
     "list":        (cmd_list,    False),
     "ls":          (cmd_list,    False),
@@ -979,6 +1041,7 @@ COMMANDS: dict[str, tuple[Callable, bool]] = {
 
 # Short opcodes used in callback_data (so the 64-byte budget isn't blown).
 CB_ALIASES: dict[str, str] = {
+    "cf": "confirm",
     "s":  "status",
     "ls": "list",
     "lg": "logs",
