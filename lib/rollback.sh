@@ -42,6 +42,15 @@ if [[ -z "$TARGET" ]]; then
 fi
 
 info "rolling back to $TARGET"
-"$LIB/run.sh" "$DEPLOY_DIR" --image "$TARGET"
-echo "$TARGET" > "$DEPLOY_DIR/def/last_image.txt"
-info "container now running $TARGET"
+# Record the rollback as a release so the deploy history reflects it (parity
+# with `nelly release restore`, which already does this).
+rel_id="$("$LIB/release.sh" create "$DEPLOY_DIR")"
+if "$LIB/run.sh" "$DEPLOY_DIR" --image "$TARGET"; then
+    echo "$TARGET" > "$DEPLOY_DIR/def/last_image.txt"
+    "$LIB/release.sh" finalize "$DEPLOY_DIR" "$rel_id" --outcome rolled_back --image "$TARGET"
+    info "container now running $TARGET"
+else
+    rc=$?
+    "$LIB/release.sh" finalize "$DEPLOY_DIR" "$rel_id" --outcome failed || true
+    die "rollback to $TARGET failed (exit $rc)"
+fi

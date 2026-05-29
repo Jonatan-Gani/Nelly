@@ -87,15 +87,18 @@ with_lock() {
     local lockfile="$deploy_dir/.nelly.lock"
     mkdir -p "$deploy_dir"
     if command -v flock >/dev/null 2>&1; then
-        exec 9>"$lockfile"
-        if ! flock -n 9; then
-            warn "another nelly run is in progress on $deploy_dir; waiting..."
-            flock 9
-        fi
-        "$@"
-        local rc=$?
-        exec 9>&-
-        return $rc
+        # Scope the lock FD to a block so it is closed on every exit path
+        # (success or failure) rather than relying on `exec 9>&-`, which the
+        # old code skipped when the wrapped command failed under set -e.
+        local rc=0
+        {
+            if ! flock -n 200; then
+                warn "another nelly run is in progress on $deploy_dir; waiting..."
+                flock 200
+            fi
+            "$@"
+        } 200>"$lockfile" || rc=$?
+        return "$rc"
     else
         "$@"
     fi

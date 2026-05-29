@@ -163,8 +163,10 @@ def send_message(token: str, chat_id: int, text: str,
     except Exception as e:
         log.warning("sendMessage failed (chat_id=%s): %s", chat_id, e)
         try:
+            # Last-ditch plaintext: drop tags AND decode entities so the user
+            # doesn't see leftover &lt; / &amp; from the HTML-escaped content.
             tg(token, "sendMessage", chat_id=chat_id,
-               text=re.sub(r"<[^>]+>", "", text),
+               text=html.unescape(re.sub(r"<[^>]+>", "", text)),
                disable_web_page_preview="true")
         except Exception:
             pass
@@ -379,7 +381,8 @@ def _latest_release_info(deployment: str) -> tuple[str, str, str] | None:
         outcome = last.get("outcome", "?")
         ts = last.get("finalized_at") or last.get("created_at") or ""
         return rel_id, outcome, fmt_age_from_iso(ts)
-    except Exception:
+    except Exception as e:
+        log.warning("could not read releases index for %s: %s", deployment, e)
         return None
 
 _SEVERITY = {"exited": 0, "dead": 0, "unhealthy": 1, "restarting": 1, "absent": 2, "running": 3}
