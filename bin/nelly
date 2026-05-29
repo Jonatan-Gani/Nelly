@@ -480,52 +480,63 @@ _deploy_dir() {
 # Wrap the full deploy pipeline including hooks + optional wait/rollback.
 _run_deploy() {
     local d="$1"; shift
-    local wait_arg="" rollback_arg="" wait_seconds=""
+    local wait_seconds="" auto_rollback=0
     declare -a pass_through=()
     while (( $# > 0 )); do
         case "$1" in
             --wait-healthy)
-                # Value is interpolated into the bash -c below; keep it a pure
-                # integer so nothing else can ride along.
                 [[ "${2:-}" =~ ^[0-9]+$ ]] || die "--wait-healthy needs an integer (seconds), got: ${2:-}"
-                wait_arg="--wait-healthy $2"; wait_seconds="$2"; shift 2 ;;
-            --auto-rollback) rollback_arg="--auto-rollback"; shift ;;
+                wait_seconds="$2"; shift 2 ;;
+            --auto-rollback) auto_rollback=1; shift ;;
             *) pass_through+=("$1"); shift ;;
         esac
     done
 
-    with_lock "$d" bash -c "
+    # Run the lifecycle in a locked subshell. The script body is fixed and
+    # single-quoted; every value arrives as a positional parameter ($1=deploy
+    # dir, $2=lib dir, $3=wait seconds, $4=auto-rollback 0|1, $5..=build args).
+    # Nothing is interpolated into the program text, so no config value or CLI
+    # arg can alter what executes.
+    with_lock "$d" bash -c '
         set -e
-        rel_id=\$('$LIB/release.sh' create '$d')
-        export NELLY_RELEASE_ID=\$rel_id
+        d="$1"; lib="$2"; wait_seconds="$3"; auto_rollback="$4"; shift 4
+        build_args=( "$@" )
 
-        # On any error before we get a chance to finalize, mark as failed
-        # so the release log isn't left in 'pending' forever.
-        trap '\"$LIB/release.sh\" finalize \"$d\" \"\$rel_id\" --outcome failed || true' ERR
+        rel_id="$("$lib/release.sh" create "$d")"
+        export NELLY_RELEASE_ID="$rel_id"
 
-        '$LIB/hooks.sh' '$d' pre_deploy
-        '$LIB/fetch.sh' '$d'
-        '$LIB/build.sh' '$d' ${pass_through[*]:-}
-        if '$LIB/run.sh' '$d' $wait_arg $rollback_arg; then
+        # On any unhandled error before finalize, mark the release failed so it
+        # is not left "pending" forever.
+        _fail() { "$lib/release.sh" finalize "$d" "$rel_id" --outcome failed || true; }
+        trap _fail ERR
+
+        "$lib/hooks.sh" "$d" pre_deploy
+        "$lib/fetch.sh" "$d"
+        "$lib/build.sh" "$d" "${build_args[@]}"
+
+        run_args=( "$d" )
+        [ -n "$wait_seconds" ] && run_args+=( --wait-healthy "$wait_seconds" )
+        [ "$auto_rollback" = 1 ] && run_args+=( --auto-rollback )
+
+        if "$lib/run.sh" "${run_args[@]}"; then
             trap - ERR
-            health=\$(docker inspect -f '{{.State.Health.Status}}' \\
-                \$(jq -r .container_name '$d/def/config.json') 2>/dev/null || echo n/a)
-            '$LIB/release.sh' finalize '$d' \"\$rel_id\" \\
-                --outcome success --health \"\$health\" \\
-                ${wait_seconds:+--wait-healthy $wait_seconds}
-            '$LIB/hooks.sh' '$d' post_deploy || true
-            '$LIB/prune.sh' '$d' || true
-            # Auto-prune old Docker images so disk doesn't grow without bound.
-            # Keeps the last N successful images (default 2) + :latest + running.
-            '$LIB/image-prune.sh' '$d' || true
+            health="$(docker inspect -f "{{.State.Health.Status}}" \
+                "$(jq -r .container_name "$d/def/config.json")" 2>/dev/null || echo n/a)"
+            fin_args=( "$d" "$rel_id" --outcome success --health "$health" )
+            [ -n "$wait_seconds" ] && fin_args+=( --wait-healthy "$wait_seconds" )
+            "$lib/release.sh" finalize "${fin_args[@]}"
+            "$lib/hooks.sh" "$d" post_deploy || true
+            "$lib/prune.sh" "$d" || true
+            # Auto-prune old images so disk does not grow without bound.
+            "$lib/image-prune.sh" "$d" || true
         else
-            rc=\$?
+            rc=$?
             trap - ERR
-            '$LIB/release.sh' finalize '$d' \"\$rel_id\" --outcome failed || true
-            '$LIB/hooks.sh' '$d' on_failure || true
-            exit \$rc
+            "$lib/release.sh" finalize "$d" "$rel_id" --outcome failed || true
+            "$lib/hooks.sh" "$d" on_failure || true
+            exit "$rc"
         fi
-    "
+    ' _ "$d" "$LIB" "$wait_seconds" "$auto_rollback" "${pass_through[@]}"
     info "deploy complete: $(basename "$d")"
 }
 
@@ -632,12 +643,20 @@ case "$cmd" in
     push)     d="$(_deploy_dir "${1:-}")"; shift || true; "$LIB/push.sh"  "$d" "$@" ;;
 
     # ---- lifecycle -----------------------------------------------------
-    start|stop|restart|exec|shell|attach|inspect|top)
+    start|stop|restart)
+        # Mutating lifecycle ops serialize against an in-flight deploy.
+        d="$(_deploy_dir "${1:-}")"; shift || true
+        with_lock "$d" "$LIB/manage.sh" "$cmd" "$d" "$@" ;;
+    exec|shell|attach|inspect|top)
+        # Read-only / interactive — exec/shell/attach replace the process via
+        # `exec docker`, so they must NOT hold the lock.
         d="$(_deploy_dir "${1:-}")"; shift || true
         "$LIB/manage.sh" "$cmd" "$d" "$@" ;;
     run-now)
+        # Runs a job inside the live container; lock so a deploy can't swap the
+        # container out mid-run.
         d="$(_deploy_dir "${1:-}")"; shift || true
-        "$LIB/manage.sh" run-now "$d" "$@" ;;
+        with_lock "$d" "$LIB/manage.sh" run-now "$d" "$@" ;;
 
     # ---- portable / backup ---------------------------------------------
     export)
@@ -670,8 +689,10 @@ case "$cmd" in
             diff)    d="$(_deploy_dir "${1:-}")"; shift || true
                      "$LIB/release.sh" diff "$d" "${1:-}" "${2:-}" ;;
             restore|revert)
+                     # Mutates config + swaps the image + writes release
+                     # records — serialize against an in-flight deploy.
                      d="$(_deploy_dir "${1:-}")"; shift || true
-                     "$LIB/release.sh" restore "$d" "$@" ;;
+                     with_lock "$d" "$LIB/release.sh" restore "$d" "$@" ;;
             note)    d="$(_deploy_dir "${1:-}")"; shift || true
                      "$LIB/release.sh" note "$d" "$@" ;;
             prune)   d="$(_deploy_dir "${1:-}")"; shift || true

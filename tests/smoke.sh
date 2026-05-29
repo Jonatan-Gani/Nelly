@@ -538,6 +538,13 @@ assert bot.resolve_cmd("cf") == "confirm"
 assert bot.COMMANDS["confirm"][1] is False and bot.COMMANDS["stop_dep"][1] is True
 resp = bot._dispatch({"allow_writes": False, "allowed_users": [1]}, "stop_dep", ["x"], 1)
 assert "writes disabled" in resp, "write command must be gated when allow_writes is false"
+assert "unknown command" in bot._dispatch({"allow_writes": True, "allowed_users": [1]}, "nope", [], 1)
+htxt, _hk = bot._split_resp(bot.cmd_help([], True))
+assert "Nelly bot" in htxt, "help must render"
+bot.run_nelly = lambda *a, **k: (0, '[{"deployment":"ok1","state":"running"},{"deployment":"bad1","state":"exited"}]')
+dtxt, _dk = bot._split_resp(bot.cmd_start([], True))
+assert "[WARN]" in dtxt and "[FAIL] bad1" in dtxt, "dashboard must surface failures"
+assert dtxt.index("bad1") < dtxt.index("ok1"), "failed deployments must sort first"
 PY
     pass "bot.py logic (keyboards/confirm/gating)"
 else

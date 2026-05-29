@@ -26,6 +26,12 @@ jobs:
       - name: python syntax check (bot.py)
         run: python3 -m py_compile lib/bot.py
 
+      - name: ruff (lint bot.py)
+        # Catches what py_compile can't (undefined names, unused imports, bad
+        # f-strings). Pinned for reproducibility; E701/E702 are ignored via
+        # ruff.toml to allow the codebase's compact one-line style.
+        run: pipx run --spec 'ruff==0.15.8' ruff check lib/bot.py
+
       - name: run smoke suite
         run: bash tests/smoke.sh
 
