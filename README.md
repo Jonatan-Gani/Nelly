@@ -976,6 +976,11 @@ command. They are the protections an untrusted config has to defeat:
 - **`base_image` must not start with `-`** (would otherwise inject an
   argument into `docker pull`). Pinning a digest (`image@sha256:…`) is
   encouraged — `nelly doctor` warns if you haven't pinned one.
+- **A custom healthcheck command (`health.cmd`) is opt-in.** Docker runs it
+  via `/bin/sh -c` *inside the container*, so it is a shell sink like the
+  entrypoint. The default (`pgrep -x cron`) needs nothing; to set your own,
+  add `allow_dangerous_health_cmd: true` — making the in-container execution
+  an explicit, file-visible decision rather than a silently-honored field.
 - **Secrets keys are restricted to `^[A-Za-z_][A-Za-z0-9_]*$`**; values
   are escaped on write; files are created with mode 0600 and that mode is
   re-asserted on every write. Per-app secrets are bind-mounted read-only
@@ -988,8 +993,9 @@ opt-in **at the top level of the config**:
 
 ```jsonc
 {
-  "allow_dangerous_volumes": true,   // skips the volume deny-list
-  "allow_dangerous_paths":   true,   // skips the local-source deny-list
+  "allow_dangerous_volumes":    true,   // skips the volume deny-list
+  "allow_dangerous_paths":      true,   // skips the local-source deny-list
+  "allow_dangerous_health_cmd": true,   // allows a custom health.cmd (runs via /bin/sh -c)
   ...
 }
 ```

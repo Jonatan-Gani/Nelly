@@ -128,6 +128,16 @@ def load_config() -> dict:
         die("config.allowed_users must be a list of integers")
     return cfg
 
+def try_reload_config(current: dict) -> dict:
+    """Poll-loop config reload that never kills the daemon: on a bad or
+    mid-edit config.json, keep the last-good config and warn instead of
+    die()ing (which would SystemExit straight past the loop's handler)."""
+    try:
+        return load_config()
+    except SystemExit:
+        log.warning("config reload failed; keeping last-good config — fix %s", CONFIG_PATH)
+        return current
+
 # ---------------------------------------------------------------------------
 # Telegram HTTP
 # ---------------------------------------------------------------------------
@@ -1187,7 +1197,7 @@ def main() -> None:
     offset: int | None = None
     while _running:
         try:
-            cfg = load_config()
+            cfg = try_reload_config(cfg)
             resp = tg(token, "getUpdates",
                       offset=offset, timeout=POLL_TIMEOUT,
                       allowed_updates=json.dumps(["message", "callback_query"]))

@@ -280,15 +280,26 @@ restore_release() {
     image="$(jq -r '.image // empty' "$dir/manifest.json")"
 
     if [[ "$mode" == "both" || "$mode" == "config" ]]; then
-        if [[ -f "$dir/config.json" ]]; then
-            cp "$dir/config.json" "$deploy_dir/def/config.json"
-            info "restored config.json from $rel_id"
+        # Stage the snapshot, validate, and keep it only if valid — otherwise
+        # leave the live config untouched (mirrors set_config/edit_config). The
+        # old code copied first and validated after, so a bad snapshot clobbered
+        # a good live config.
+        local cfg_live="$deploy_dir/def/config.json"
+        local lock_live="$deploy_dir/def/commits.lock.json"
+        local cfg_bak; cfg_bak="$(mktemp)"; cp "$cfg_live" "$cfg_bak"
+        local had_lock=0 lock_bak=""
+        if [[ -f "$lock_live" ]]; then had_lock=1; lock_bak="$(mktemp)"; cp "$lock_live" "$lock_bak"; fi
+
+        [[ -f "$dir/config.json" ]]       && cp "$dir/config.json"       "$cfg_live"
+        [[ -f "$dir/commits.lock.json" ]] && cp "$dir/commits.lock.json" "$lock_live"
+
+        if ! validate_config "$deploy_dir" >/dev/null 2>&1; then
+            mv "$cfg_bak" "$cfg_live"
+            if (( had_lock )); then mv "$lock_bak" "$lock_live"; else rm -f "$lock_live"; fi
+            die "release $rel_id failed validation; restore aborted (live config unchanged)"
         fi
-        if [[ -f "$dir/commits.lock.json" ]]; then
-            cp "$dir/commits.lock.json" "$deploy_dir/def/commits.lock.json"
-            info "restored commits.lock.json from $rel_id"
-        fi
-        validate_config "$deploy_dir" >/dev/null
+        rm -f "$cfg_bak"; [[ -n "$lock_bak" ]] && rm -f "$lock_bak"
+        info "restored config.json (+lock) from $rel_id"
     fi
 
     if [[ "$mode" == "both" || "$mode" == "image" ]]; then

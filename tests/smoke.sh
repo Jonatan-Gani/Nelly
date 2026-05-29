@@ -348,6 +348,35 @@ else
 fi
 bin/nelly set "$NAME" '.hooks.pre_deploy' '' >/dev/null 2>&1
 
+# Healthcheck command is a shell sink (docker runs it via /bin/sh -c) — a
+# custom one must be opted into explicitly, like dangerous volumes/paths.
+if bin/nelly set "$NAME" '.health.cmd' '"id; rm -rf /"' >/dev/null 2>&1; then
+    fail "accepted custom health.cmd without opt-in"
+else
+    pass "rejected custom health.cmd without opt-in"
+fi
+bin/nelly set "$NAME" '.allow_dangerous_health_cmd' 'true' >/dev/null 2>&1
+if bin/nelly set "$NAME" '.health.cmd' '"curl -fsS http://localhost/health || exit 1"' >/dev/null 2>&1; then
+    pass "accepted custom health.cmd with opt-in"
+else
+    fail "rejected custom health.cmd with opt-in"
+fi
+bin/nelly set "$NAME" '.health.cmd' '""' >/dev/null 2>&1
+bin/nelly set "$NAME" '.allow_dangerous_health_cmd' 'false' >/dev/null 2>&1
+
+# log_retention_days feeds `find -mtime` and must be a plain integer.
+if bin/nelly set "$NAME" '.log_retention_days' '"abc"' >/dev/null 2>&1; then
+    fail "accepted non-numeric log_retention_days"
+else
+    pass "rejected non-numeric log_retention_days"
+fi
+if bin/nelly set "$NAME" '.log_retention_days' '14' >/dev/null 2>&1; then
+    pass "accepted numeric log_retention_days"
+else
+    fail "rejected numeric log_retention_days"
+fi
+bin/nelly set "$NAME" '.log_retention_days' '7' >/dev/null 2>&1
+
 # ----------------------------------------------------------------------------
 section "doctor (offline-friendly)"
 bin/nelly doctor "$NAME" >/dev/null 2>&1 || true
@@ -488,6 +517,31 @@ if python3 -m py_compile lib/bot.py 2>/dev/null; then
     pass "bot.py compiles"
 else
     fail "bot.py syntax error"
+fi
+# bot.py logic (offline): keyboards, confirm guard, dispatch write-gating.
+# Runs in a throwaway NELLY_ROOT so the real bot/ is never touched. py_compile
+# only catches syntax; this catches NameError/AttributeError in tested paths.
+if NELLY_ROOT="$(mktemp -d)" python3 - <<'PY' 2>/dev/null; then
+import sys
+sys.path.insert(0, "lib")
+import bot
+assert bot.state_marker("exited") == "[FAIL]" and bot.state_marker("running") == "[OK]"
+rows = bot.kbd_for_deployment("x", True)
+assert all(len(r) <= 2 for r in rows), "keyboard rows must be <=2 wide"
+labels = {l: d for r in rows for (l, d) in r}
+assert labels["Stop"] == "cf|st|x" and labels["Deploy"] == "cf|dp|x", "destructive taps must confirm"
+_txt, kb = bot.cmd_confirm(["st", "x"], False)
+flat = [(b["text"], b["callback_data"]) for row in kb for b in row]
+assert any(t.startswith("Yes") and d == "st|x" for t, d in flat), "confirm Yes replays the op"
+assert any(t == "Cancel" for t, _ in flat), "confirm offers Cancel"
+assert bot.resolve_cmd("cf") == "confirm"
+assert bot.COMMANDS["confirm"][1] is False and bot.COMMANDS["stop_dep"][1] is True
+resp = bot._dispatch({"allow_writes": False, "allowed_users": [1]}, "stop_dep", ["x"], 1)
+assert "writes disabled" in resp, "write command must be gated when allow_writes is false"
+PY
+    pass "bot.py logic (keyboards/confirm/gating)"
+else
+    fail "bot.py logic checks"
 fi
 # bot subcommand surfaces help
 if bin/nelly bot 2>&1 | grep -q "bot <sub>"; then pass "bot help"; else fail "bot help"; fi

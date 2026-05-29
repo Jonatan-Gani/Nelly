@@ -242,6 +242,24 @@ validate_config() {
     if [[ -n "$hcretries" ]] && ! [[ "$hcretries" =~ ^[0-9]+$ ]]; then
         errors+=(".health.retries '$hcretries' must be a non-negative integer")
     fi
+    # .health.cmd is the one config field that reaches a shell — docker runs it
+    # via `/bin/sh -c` inside the container. A custom one is therefore gated
+    # behind an explicit opt-in (mirrors allow_dangerous_volumes/_paths); the
+    # default healthcheck (applied by run.sh when .health.cmd is empty) is fine.
+    local hccmd _allow_hc
+    hccmd="$(jqget "$config" '.health.cmd' '')"
+    _allow_hc="$(jqget "$config" '.allow_dangerous_health_cmd' 'false')"
+    if [[ -n "$hccmd" && "$_allow_hc" != "true" ]]; then
+        errors+=(".health.cmd runs a shell command inside the container; set .allow_dangerous_health_cmd=true to use a custom one (the default cron healthcheck needs no opt-in)")
+    fi
+
+    # .log_retention_days feeds `find -mtime "+N"`; must be a plain integer or
+    # pruning silently breaks (it is quoted, so this is correctness not injection).
+    local lrd
+    lrd="$(jqget "$config" '.log_retention_days' '')"
+    if [[ -n "$lrd" ]] && ! [[ "$lrd" =~ ^[0-9]+$ ]]; then
+        errors+=(".log_retention_days '$lrd' must be a non-negative integer")
+    fi
 
     if (( ${#errors[@]} > 0 )); then
         err "config validation failed for $config:"
