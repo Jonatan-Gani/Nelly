@@ -40,9 +40,11 @@
   "volumes": [],
 
   "hooks": {
-    "pre_deploy":  "",
-    "post_deploy": "",
-    "on_failure":  ""
+    "pre_deploy":    "",
+    "post_deploy":   "",
+    "on_failure":    "",
+    "pre_snapshot":  "",
+    "post_snapshot": ""
   },
 
   "packages": [

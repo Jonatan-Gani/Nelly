@@ -14,6 +14,7 @@
 #   - export → import round-trip (with and without secrets)
 #   - clone
 #   - backup → restore round-trip
+#   - snapshot bundle (fleet restore bundle for off-site backup)
 #   - cron preview
 #   - all list
 #   - plan
@@ -39,6 +40,7 @@ fi
 
 cleanup() {
     rm -rf containers/smoketest-* /tmp/nelly-smoke-*.json /tmp/nelly-smoke-*.tar.gz 2>/dev/null || true
+    rm -rf /tmp/nelly-smoke-snap-* /tmp/nelly-smoke-hookdir-* 2>/dev/null || true
     rm -rf bot 2>/dev/null || true
     # Restore the user's real bot/ if we moved it aside.
     if [[ -n "$BOT_BACKUP" && -d "$BOT_BACKUP" ]]; then
@@ -250,6 +252,58 @@ bin/nelly restore "$TARBALL" --as "$REST" >/dev/null 2>&1
 [[ -d "containers/$REST" ]] && pass "restore created deployment" || fail "restore"
 [[ "$(bin/nelly get "$REST" '.container_name')" == "$REST" ]] \
     && pass "restore retargets name" || fail "restore name"
+
+# ----------------------------------------------------------------------------
+section "snapshot bundle"
+SNAP_OUT="/tmp/nelly-smoke-snap-$$"
+rm -rf "$SNAP_OUT"
+# --no-volumes because the smoketest deployment has none, --no-quiesce
+# because we have no Docker available in the offline suite.
+bin/nelly snapshot create --out "$SNAP_OUT" --no-quiesce --no-volumes >/dev/null 2>&1
+[[ -f "$SNAP_OUT/BUNDLE_VERSION" ]]      && pass "snapshot wrote BUNDLE_VERSION"      || fail "no BUNDLE_VERSION"
+[[ -f "$SNAP_OUT/snapshot.json" ]]       && pass "snapshot wrote snapshot.json"       || fail "no snapshot.json"
+[[ -f "$SNAP_OUT/fleet-manifest.json" ]] && pass "snapshot wrote fleet-manifest.json" || fail "no fleet-manifest.json"
+[[ -f "$SNAP_OUT/README.txt" ]]          && pass "snapshot wrote README.txt"          || fail "no README.txt"
+[[ -f "$SNAP_OUT/deployments/$NAME/tarball.tar.gz" ]] \
+    && pass "snapshot tarballed $NAME"   || fail "no tarball for $NAME"
+jq -e --arg n "$NAME" '.deployments | map(.name) | index($n) != null' \
+    "$SNAP_OUT/fleet-manifest.json" >/dev/null \
+    && pass "fleet-manifest lists $NAME" || fail "manifest missing $NAME"
+jq -e '.schema_version == 1' "$SNAP_OUT/fleet-manifest.json" >/dev/null \
+    && pass "fleet-manifest has schema_version" || fail "no schema_version"
+# Secrets included by default — restic encrypts client-side; we want them in.
+tar -tzf "$SNAP_OUT/deployments/$NAME/tarball.tar.gz" | grep -q 'def/\.env' \
+    && pass "snapshot bundle includes secrets by default" \
+    || fail "snapshot bundle missing secrets (--no-secrets default leaked?)"
+# verify subcommand
+bin/nelly snapshot verify --out "$SNAP_OUT" >/dev/null 2>&1 \
+    && pass "snapshot verify passes on a fresh bundle" \
+    || fail "snapshot verify failed"
+# --no-secrets opts out
+SNAP_NS="/tmp/nelly-smoke-snap-ns-$$"
+rm -rf "$SNAP_NS"
+bin/nelly snapshot create --out "$SNAP_NS" --no-quiesce --no-volumes --no-secrets >/dev/null 2>&1
+if tar -tzf "$SNAP_NS/deployments/$NAME/tarball.tar.gz" | grep -qE 'def/(\.env|secrets/)'; then
+    fail "--no-secrets leaked secrets"
+else
+    pass "--no-secrets keeps secrets out"
+fi
+# atomic swap: re-running the snapshot must produce a fresh bundle (not
+# pile up .new / .old siblings)
+bin/nelly snapshot create --out "$SNAP_OUT" --no-quiesce --no-volumes >/dev/null 2>&1
+[[ ! -d "${SNAP_OUT}.new" && ! -d "${SNAP_OUT}.old" ]] \
+    && pass "snapshot cleans up .new/.old siblings" \
+    || fail "snapshot left ${SNAP_OUT}.new or .old behind"
+# install-hook should produce an executable script we can read.
+HOOK_DIR="/tmp/nelly-smoke-hookdir-$$"
+mkdir -p "$HOOK_DIR"
+bin/nelly snapshot install-hook --hook-dir "$HOOK_DIR" --name 99-test >/dev/null 2>&1
+[[ -x "$HOOK_DIR/99-test" ]] && pass "install-hook drops an executable script" || fail "install-hook"
+grep -q 'snapshot create' "$HOOK_DIR/99-test" \
+    && pass "installed hook invokes snapshot create" || fail "hook content"
+bin/nelly snapshot uninstall-hook --hook-dir "$HOOK_DIR" --name 99-test >/dev/null 2>&1
+[[ ! -e "$HOOK_DIR/99-test" ]] && pass "uninstall-hook removes the script" || fail "uninstall-hook"
+rm -rf "$SNAP_OUT" "$SNAP_NS" "$HOOK_DIR"
 
 # ----------------------------------------------------------------------------
 section "all (multi-deployment)"

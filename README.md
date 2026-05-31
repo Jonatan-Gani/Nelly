@@ -332,6 +332,13 @@ half-broken.
 - `nelly clone <src> <dest>`
 - `nelly backup <name> [--out PATH] [--include-logs] [--include-secrets]`
 - `nelly restore <tarball> [--as <name>] [--force]`
+- `nelly snapshot create` — fleet-wide restore bundle at `/var/backups/nelly/`
+  for off-site tools (restic, borg) to walk. Includes a fleet manifest with
+  image digests, ports, networks, env-file paths, app commits; per-deployment
+  tarball + `docker inspect` + quiesced volume tars; nelly's own state.
+- `nelly snapshot install-hook` — drops a script into
+  `/etc/restic/pre-backup.d/` so the bundle regenerates synchronously before
+  each off-site backup run.
 
 ### Across many deployments
 - `nelly all list [--tag T]…`
@@ -400,6 +407,49 @@ nelly restore scraper.tar.gz
 nelly doctor scraper
 nelly deploy scraper
 ```
+
+### Fleet-wide disaster recovery (off-site backup contract)
+The backup layer (restic, borg, ...) copies files from declared paths,
+nightly, encrypted, off-site. Nelly continuously materializes everything
+that must survive a wipe into one declared directory, in a consistent
+state, as restore-ready artifacts:
+
+```sh
+# One-off: produce a bundle at /var/backups/nelly/.
+sudo install -d -o "$USER" -g "$USER" -m 0700 /var/backups/nelly
+nelly snapshot create
+
+# Wire it into restic so the bundle is regenerated synchronously right
+# before each off-site run.
+sudo mkdir -p /etc/restic/pre-backup.d
+nelly snapshot install-hook                 # drops 50-nelly-snapshot in there
+# Your restic invocation needs: run-parts /etc/restic/pre-backup.d/
+
+# Inspect what's in the bundle.
+nelly snapshot list
+nelly snapshot verify                       # sha256 + structural check
+```
+
+The bundle (default `/var/backups/nelly/`) contains:
+- `fleet-manifest.json` — for each container: image pinned by `@sha256:`,
+  ports, networks, mounted volumes, paths to env files, app commits.
+  Reproducing the fleet on a fresh host is mechanical, not guesswork.
+- `deployments/<name>/tarball.tar.gz` — the deployment directory, including
+  secrets (off-site is encrypted; Nelly's job is to make sure they're not
+  silently missed).
+- `deployments/<name>/volumes/*.tar.gz` — bind-mounted host paths,
+  **quiesced** by stopping the container before tarring and restarting
+  after (never walked live; that's how torn files happen).
+- `deployments/<name>/dumps/` — `hooks.pre_snapshot` runs BEFORE quiesce so
+  database containers can drop a `pg_dump` / `mysqldump` into the bundle
+  while still live.
+- `nelly-state/bot.tar.gz`, `nelly-state/nelly-commit.txt` — Nelly's own
+  state and exact source commit.
+
+Acceptance test: given only the off-site repo + the password manager, on a
+freshly flashed Pi, can you reconstruct every container nelly managed —
+same images, same volumes, same secrets — without guessing? If yes, the
+bundle is complete.
 
 ### Version-control your deployments
 ```sh
@@ -540,20 +590,23 @@ normalised to `{type:"git", …}` internally.
 
 Hooks are shell scripts on the **host** that Nelly runs at lifecycle points:
 
-| Hook          | When                                              | Failure means       |
-| ------------- | ------------------------------------------------- | ------------------- |
-| `pre_deploy`  | Before `fetch`                                    | Abort the deploy    |
-| `post_deploy` | After a successful `run` (and health, if waited)  | Logged, not fatal   |
-| `on_failure`  | If the deploy fails                               | Logged, not fatal   |
+| Hook            | When                                              | Failure means       |
+| --------------- | ------------------------------------------------- | ------------------- |
+| `pre_deploy`    | Before `fetch`                                    | Abort the deploy    |
+| `post_deploy`   | After a successful `run` (and health, if waited)  | Logged, not fatal   |
+| `on_failure`    | If the deploy fails                               | Logged, not fatal   |
+| `pre_snapshot`  | Before quiesce, during `nelly snapshot create`    | Logged, not fatal   |
+| `post_snapshot` | After volumes are tarred and the container is restarted | Logged, not fatal |
 
 Each hook gets these env vars:
 
-| Variable           | Value                                                       |
-| ------------------ | ----------------------------------------------------------- |
-| `NELLY_DEPLOYMENT` | Deployment name                                             |
-| `NELLY_DEPLOY_DIR` | Absolute path to the deployment directory                   |
-| `NELLY_HOOK`       | One of `pre_deploy` / `post_deploy` / `on_failure`          |
-| `NELLY_IMAGE`      | Image tag that was just built (best-effort)                 |
+| Variable             | Value                                                            |
+| -------------------- | ---------------------------------------------------------------- |
+| `NELLY_DEPLOYMENT`   | Deployment name                                                  |
+| `NELLY_DEPLOY_DIR`   | Absolute path to the deployment directory                        |
+| `NELLY_HOOK`         | One of `pre_deploy` / `post_deploy` / `on_failure` / `pre_snapshot` / `post_snapshot` |
+| `NELLY_IMAGE`        | Image tag that was just built (best-effort)                      |
+| `NELLY_SNAPSHOT_DIR` | (snapshot hooks only) per-deployment bundle dir, e.g. `/var/backups/nelly/deployments/<name>/`. Drop pg_dump output into `$NELLY_SNAPSHOT_DIR/dumps/`. |
 
 ---
 

@@ -49,6 +49,7 @@ $(_bold "Share / migrate / back up")
   $(_bold "nelly import <file>")        $(_dim "# create a deployment from a JSON export")
   $(_bold "nelly clone  <src> <dest>")  $(_dim "# fork an existing deployment")
   $(_bold "nelly backup <name>")        $(_dim "# tarball for disaster recovery")
+  $(_bold "nelly snapshot")             $(_dim "# build restore bundle at /var/backups/nelly (for restic et al.)")
 
 $(_bold "Across many deployments")
   $(_bold "nelly all list")             $(_dim "# tag-aware listing")
@@ -165,6 +166,9 @@ $(_bold "SHARE / MIGRATE / BACK UP")
   backup     <name> [--out PATH] [--include-logs]
                                          Tarball of the deployment dir
   restore    <tarball> [--as <name>] [--force]
+  snapshot   create|verify|list|install-hook
+                                         Build / inspect the fleet-wide restore bundle
+                                         at /var/backups/nelly for off-site backup tools.
 
 $(_bold "ACROSS MANY DEPLOYMENTS")
   all <cmd>  [--tag T]... [--fail-fast]
@@ -291,6 +295,63 @@ backup  → tarball of the deployment directory (config + secrets + lockfile
 
 restore → recreate a deployment from a tarball, optionally under a new
           name. The deployment is ready to run \`nelly deploy\`.
+EOF
+            ;;
+
+        snapshot) cat <<EOF
+$(_bold "nelly snapshot <sub> ...")
+
+Produces a fleet-wide restore bundle for the off-site backup layer (restic,
+borg, etc.) to walk. The bundle is the contract: everything required to
+reconstruct every container nelly manages on a freshly flashed host —
+images, volumes, secrets — in one declared directory, in a consistent state.
+
+Default output: $(_bold "/var/backups/nelly") (override with --out or NELLY_BACKUP_DIR).
+
+    snapshot create   [--out DIR] [--no-quiesce] [--no-volumes] [--no-secrets]
+                      [--exclude NAME]... [--only NAME]... [--quiesce-time N]
+                      Build the bundle. Per deployment: snapshot tarball
+                      (config + secrets + lockfile + releases), docker
+                      inspect, image digest pin, and a quiesced tar of each
+                      declared bind-mount volume. Atomically swaps in.
+                      hooks.pre_snapshot runs BEFORE quiesce (drop pg_dump
+                      / mysqldump output into \$NELLY_SNAPSHOT_DIR/dumps/).
+
+    snapshot verify   [--out DIR]
+                      Structural check: BUNDLE_VERSION, JSON validity of
+                      fleet-manifest.json, presence of per-deployment
+                      tarballs, sha256 of each volume tarball matches its
+                      .meta.json.
+
+    snapshot list     [--out DIR]
+                      Print metadata from the most recent run: when, host,
+                      duration, size, per-deployment success/failure.
+
+    snapshot install-hook   [--hook-dir DIR] [--name NAME]
+                      Drop a tiny pre-backup hook script into a run-parts
+                      dir (default $(_bold "/etc/restic/pre-backup.d/")) so the
+                      bundle is regenerated synchronously before each
+                      off-site run. Avoids the timing-fragile "nelly on its
+                      own timer" pattern.
+
+    snapshot uninstall-hook [--hook-dir DIR] [--name NAME]
+
+$(_bold "Bundle layout (at \$OUT):")
+    BUNDLE_VERSION            schema version ("1")
+    README.txt                restore steps
+    snapshot.json             generation metadata + per-deployment results
+    fleet-manifest.json       images, digests, ports, networks, volumes,
+                              env-file paths, app commits
+    deployments/<name>/
+        tarball.tar.gz        full deployment dir incl. secrets
+        container-inspect.json
+        image-digest.txt      image@sha256:...
+        volumes/<slug>.tar.gz quiesced tar of each bind-mount
+        volumes/<slug>.meta.json
+        dumps/                where hooks.pre_snapshot drops DB dumps
+    nelly-state/
+        bot.tar.gz            Telegram bot state if present
+        nelly-commit.txt      git HEAD of nelly itself
 EOF
             ;;
 
@@ -674,6 +735,15 @@ case "$cmd" in
         "$LIB/backup.sh" backup "$d" "$@" ;;
     restore)
         "$LIB/backup.sh" restore "$@" ;;
+
+    # ---- fleet-wide restore bundle (for restic / borg / ...) -----------
+    snapshot)
+        sub="${1:-create}"; shift || true
+        case "$sub" in
+            create|verify|list|ls|status|install-hook|uninstall-hook|help|-h|--help|"")
+                "$LIB/snapshot.sh" "$sub" "$@" ;;
+            *) err "unknown snapshot sub: $sub"; echo "Try: nelly help snapshot" >&2; exit 2 ;;
+        esac ;;
 
     # ---- across many deployments --------------------------------------
     all)

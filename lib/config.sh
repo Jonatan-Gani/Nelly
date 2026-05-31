@@ -163,7 +163,7 @@ validate_config() {
     # the host with the invoking user's privileges, so this is a security
     # boundary, not just a style guide.
     local hook
-    for hook in pre_deploy post_deploy on_failure; do
+    for hook in pre_deploy post_deploy on_failure pre_snapshot post_snapshot; do
         local hp; hp="$(jqget "$config" ".hooks.$hook")"
         [[ -z "$hp" ]] && continue
         if [[ "$hp" == /* ]]; then
