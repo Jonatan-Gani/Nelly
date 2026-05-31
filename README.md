@@ -430,21 +430,36 @@ nelly snapshot list
 nelly snapshot verify                       # sha256 + structural check
 ```
 
-The bundle (default `/var/backups/nelly/`) contains:
+The bundle (default `/var/backups/nelly/`, mode 0700) contains:
 - `fleet-manifest.json` — for each container: image pinned by `@sha256:`,
   ports, networks, mounted volumes, paths to env files, app commits.
   Reproducing the fleet on a fresh host is mechanical, not guesswork.
-- `deployments/<name>/tarball.tar.gz` — the deployment directory, including
+- `deployments/<name>/tarball.tar` — the deployment directory, including
   secrets (off-site is encrypted; Nelly's job is to make sure they're not
-  silently missed).
-- `deployments/<name>/volumes/*.tar.gz` — bind-mounted host paths,
+  silently missed). **Uncompressed and deterministic** (`--sort=name
+  --numeric-owner`) so the off-site repo's chunk-dedup actually works —
+  a gzip layer here would cascade any one-byte change through the whole
+  stream and re-upload unchanged volumes nightly.
+- `deployments/<name>/volumes/*.tar` — bind-mounted host paths,
   **quiesced** by stopping the container before tarring and restarting
-  after (never walked live; that's how torn files happen).
+  after (never walked live; that's how torn files happen). An EXIT trap
+  guarantees the container restarts even on SIGINT / unexpected die —
+  a backup that takes a service down and leaves it down is worse than a
+  missed backup.
 - `deployments/<name>/dumps/` — `hooks.pre_snapshot` runs BEFORE quiesce so
   database containers can drop a `pg_dump` / `mysqldump` into the bundle
-  while still live.
-- `nelly-state/bot.tar.gz`, `nelly-state/nelly-commit.txt` — Nelly's own
+  while still live. When you do this, list the DB's data-dir bind-mount in
+  `.backup.skip_volumes` so it isn't *also* quiesce-tarred — otherwise the
+  same database ships twice (once cleanly, once as a heavier on-disk copy
+  that brings back the torn-file risk you were avoiding).
+- `nelly-state/bot.tar`, `nelly-state/nelly-commit.txt` — Nelly's own
   state and exact source commit.
+
+`nelly snapshot create` **self-verifies** before returning. The installed
+hook is strict-mode (`set -euo pipefail`), so a corrupt or stale bundle
+exits non-zero, which the backup runner must treat as abort + alert.
+A bad bundle should trip the loud-fail loop tonight, not be discovered
+at restore time.
 
 Acceptance test: given only the off-site repo + the password manager, on a
 freshly flashed Pi, can you reconstruct every container nelly managed —

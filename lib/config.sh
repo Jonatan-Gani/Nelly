@@ -211,6 +211,20 @@ validate_config() {
         fi
     done
 
+    # backup.skip_volumes — host paths that `nelly snapshot` should NOT
+    # quiesce-tar (because hooks.pre_snapshot covers them with a logical
+    # dump). Each must be an absolute path with no '..' — same rules as
+    # .volumes host-side validation.
+    if [[ "$(jq '.backup.skip_volumes != null' "$config")" == "true" ]]; then
+        [[ "$(jq '.backup.skip_volumes | type' "$config")" == '"array"' ]] \
+            || errors+=(".backup.skip_volumes must be an array of host paths")
+        mapfile -t _SKIPVOLS < <(jq -r '.backup.skip_volumes[]?' "$config")
+        for sv in "${_SKIPVOLS[@]}"; do
+            [[ "$sv" == /* ]]    || errors+=(".backup.skip_volumes entry '$sv' must be an absolute path")
+            [[ "$sv" == *..* ]] && errors+=(".backup.skip_volumes entry '$sv' must not contain '..'")
+        done
+    fi
+
     # Extra networks: each must be a string
     mapfile -t XNETS < <(jq -r '.network.extra_networks[]?' "$config")
     for n in "${XNETS[@]}"; do

@@ -310,12 +310,19 @@ Default output: $(_bold "/var/backups/nelly") (override with --out or NELLY_BACK
 
     snapshot create   [--out DIR] [--no-quiesce] [--no-volumes] [--no-secrets]
                       [--exclude NAME]... [--only NAME]... [--quiesce-time N]
+                      [--no-verify]
                       Build the bundle. Per deployment: snapshot tarball
                       (config + secrets + lockfile + releases), docker
                       inspect, image digest pin, and a quiesced tar of each
-                      declared bind-mount volume. Atomically swaps in.
+                      declared bind-mount volume. Atomically swaps in. Self-
+                      verifies on completion and exits non-zero if the
+                      bundle is bad — so a broken snapshot trips the backup
+                      runner's hard-fail tonight, not at restore time.
                       hooks.pre_snapshot runs BEFORE quiesce (drop pg_dump
                       / mysqldump output into \$NELLY_SNAPSHOT_DIR/dumps/).
+                      Volumes listed in .backup.skip_volumes are NOT also
+                      quiesce-tarred (so a logical dump and an on-disk copy
+                      of the same DB don't both ship).
 
     snapshot verify   [--out DIR]
                       Structural check: BUNDLE_VERSION, JSON validity of
@@ -336,21 +343,23 @@ Default output: $(_bold "/var/backups/nelly") (override with --out or NELLY_BACK
 
     snapshot uninstall-hook [--hook-dir DIR] [--name NAME]
 
-$(_bold "Bundle layout (at \$OUT):")
+$(_bold "Bundle layout (at \$OUT, mode 0700):")
     BUNDLE_VERSION            schema version ("1")
     README.txt                restore steps
     snapshot.json             generation metadata + per-deployment results
     fleet-manifest.json       images, digests, ports, networks, volumes,
                               env-file paths, app commits
     deployments/<name>/
-        tarball.tar.gz        full deployment dir incl. secrets
+        tarball.tar           full deployment dir incl. secrets
+                              (uncompressed + deterministic for restic dedup)
         container-inspect.json
         image-digest.txt      image@sha256:...
-        volumes/<slug>.tar.gz quiesced tar of each bind-mount
+        volumes/<slug>.tar    quiesced tar of each bind-mount (uncompressed)
         volumes/<slug>.meta.json
+        volumes/skipped-volumes.json   volumes covered by hooks.pre_snapshot
         dumps/                where hooks.pre_snapshot drops DB dumps
     nelly-state/
-        bot.tar.gz            Telegram bot state if present
+        bot.tar               Telegram bot state if present
         nelly-commit.txt      git HEAD of nelly itself
 EOF
             ;;

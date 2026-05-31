@@ -38,18 +38,36 @@ case "$sub" in
         OUT=""
         INCLUDE_LOGS=0
         INCLUDE_SECRETS=0
+        NO_COMPRESS=0
+        DETERMINISTIC=0
+        QUIET=0
         while (( $# > 0 )); do
             case "$1" in
                 --out)             OUT="$2"; shift 2 ;;
                 --include-logs)    INCLUDE_LOGS=1; shift ;;
                 --include-secrets) INCLUDE_SECRETS=1; shift ;;
+                # --no-compress + --deterministic: dedup-friendly mode used by
+                # `nelly snapshot`. Off-site stores (restic, borg) chunk + compress
+                # themselves; a gzip layer here cascades a one-byte change through
+                # the whole stream and destroys their chunk dedup, so unchanged
+                # bundles re-upload in full every run. Sorted names + numeric
+                # owners keep the tar stream stable across hosts.
+                --no-compress)     NO_COMPRESS=1; shift ;;
+                --deterministic)   DETERMINISTIC=1; shift ;;
+                --quiet)           QUIET=1; shift ;;
                 *) die "unknown flag: $1" ;;
             esac
         done
 
         name="$(basename "$DEPLOY_DIR")"
         ts="$(date -u +%Y%m%d-%H%M%S)"
-        [[ -z "$OUT" ]] && OUT="${name}-${ts}.tar.gz"
+        if [[ -z "$OUT" ]]; then
+            if (( NO_COMPRESS )); then
+                OUT="${name}-${ts}.tar"
+            else
+                OUT="${name}-${ts}.tar.gz"
+            fi
+        fi
 
         # Build the file list. apps/ is excluded (will be re-fetched), .build/
         # is transient, the lockfile too. Secrets and logs are excluded by
@@ -62,21 +80,37 @@ case "$sub" in
         )
         (( INCLUDE_LOGS )) || EXCLUDES+=(--exclude='logs')
         if (( INCLUDE_SECRETS )); then
-            warn "including secrets in backup — handle this file like a password (mode 0600 on disk; do NOT commit it anywhere)"
+            (( QUIET )) || warn "including secrets in backup — handle this file like a password (mode 0600 on disk; do NOT commit it anywhere)"
         else
             EXCLUDES+=(--exclude='def/.env' --exclude='def/secrets')
         fi
 
-        info "writing backup → $OUT"
+        declare -a TAR_FLAGS=()
+        (( NO_COMPRESS )) || TAR_FLAGS+=(-z)
+        if (( DETERMINISTIC )); then
+            # --sort=name removes ls-order non-determinism. --numeric-owner
+            # avoids per-host uid/gid name resolution. Mtime is intentionally
+            # NOT zeroed: unchanged file content has unchanged mtime, so the
+            # tar stream is still stable; zeroing would break post-restore
+            # tooling that checks file ages.
+            TAR_FLAGS+=(--sort=name --numeric-owner)
+        fi
+
+        (( QUIET )) || info "writing backup → $OUT"
         # Use tar's -C to make paths relative; resulting tarball restores to <name>/...
-        tar -czf "$OUT" "${EXCLUDES[@]}" \
+        tar -c "${TAR_FLAGS[@]}" -f "$OUT" "${EXCLUDES[@]}" \
             -C "$(dirname "$DEPLOY_DIR")" "$name"
 
-        # Print a small summary
-        size="$(du -h "$OUT" | cut -f1)"
-        info "  size: $size"
-        info "  contents:"
-        tar -tzf "$OUT" | sed 's/^/    /'
+        if (( ! QUIET )); then
+            size="$(du -h "$OUT" | cut -f1)"
+            info "  size: $size"
+            info "  contents:"
+            if (( NO_COMPRESS )); then
+                tar -tf "$OUT" | sed 's/^/    /'
+            else
+                tar -tzf "$OUT" | sed 's/^/    /'
+            fi
+        fi
         ;;
 
     restore)
@@ -94,7 +128,9 @@ case "$sub" in
         # Stage to a temp dir, pick the top-level deployment name, then move.
         tmp="$(mktemp -d)"
         trap 'rm -rf "$tmp"' EXIT
-        tar -xzf "$TARBALL" -C "$tmp"
+        # Auto-detect gzip vs plain tar so restore works on bundles that used
+        # --no-compress (e.g. snapshot bundles tuned for restic dedup).
+        tar -xf "$TARBALL" -C "$tmp"
 
         # Detect the top-level directory inside the tarball.
         mapfile -t roots < <(find "$tmp" -mindepth 1 -maxdepth 1 -type d -printf '%f\n')

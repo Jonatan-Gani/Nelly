@@ -264,26 +264,59 @@ bin/nelly snapshot create --out "$SNAP_OUT" --no-quiesce --no-volumes >/dev/null
 [[ -f "$SNAP_OUT/snapshot.json" ]]       && pass "snapshot wrote snapshot.json"       || fail "no snapshot.json"
 [[ -f "$SNAP_OUT/fleet-manifest.json" ]] && pass "snapshot wrote fleet-manifest.json" || fail "no fleet-manifest.json"
 [[ -f "$SNAP_OUT/README.txt" ]]          && pass "snapshot wrote README.txt"          || fail "no README.txt"
-[[ -f "$SNAP_OUT/deployments/$NAME/tarball.tar.gz" ]] \
-    && pass "snapshot tarballed $NAME"   || fail "no tarball for $NAME"
+[[ -f "$SNAP_OUT/deployments/$NAME/tarball.tar" ]] \
+    && pass "snapshot wrote uncompressed tarball.tar for $NAME" \
+    || fail "no tarball.tar for $NAME (uncompressed for restic dedup)"
 jq -e --arg n "$NAME" '.deployments | map(.name) | index($n) != null' \
     "$SNAP_OUT/fleet-manifest.json" >/dev/null \
     && pass "fleet-manifest lists $NAME" || fail "manifest missing $NAME"
 jq -e '.schema_version == 1' "$SNAP_OUT/fleet-manifest.json" >/dev/null \
     && pass "fleet-manifest has schema_version" || fail "no schema_version"
+
+# Hardening: 0700 perms on the bundle root (cleartext secrets between runs).
+bundle_mode="$(stat -c %a "$SNAP_OUT")"
+[[ "$bundle_mode" == "700" ]] \
+    && pass "bundle root is mode 0700" \
+    || fail "bundle root mode is $bundle_mode (expected 700)"
+
+# Hardening: tar inside the bundle is uncompressed (so restic chunk-dedups).
+# `file` exists everywhere; an uncompressed tar should NOT report "gzip".
+if file "$SNAP_OUT/deployments/$NAME/tarball.tar" 2>/dev/null | grep -q 'gzip'; then
+    fail "deployment tarball is gzip-compressed (kills restic dedup)"
+else
+    pass "deployment tarball is uncompressed (restic-friendly)"
+fi
 # Secrets included by default — restic encrypts client-side; we want them in.
-tar -tzf "$SNAP_OUT/deployments/$NAME/tarball.tar.gz" | grep -q 'def/\.env' \
+tar -tf "$SNAP_OUT/deployments/$NAME/tarball.tar" | grep -q 'def/\.env' \
     && pass "snapshot bundle includes secrets by default" \
     || fail "snapshot bundle missing secrets (--no-secrets default leaked?)"
-# verify subcommand
+# verify subcommand (also asserts the self-verify in create already passed)
 bin/nelly snapshot verify --out "$SNAP_OUT" >/dev/null 2>&1 \
     && pass "snapshot verify passes on a fresh bundle" \
     || fail "snapshot verify failed"
+
+# Hardening: self-verify in create fails loud if the bundle is broken.
+# Corrupt a volume tarball's sha256 to simulate a torn write, then re-run
+# verify to confirm it actually catches it.
+mkdir -p "$SNAP_OUT/deployments/$NAME/volumes"
+echo "real-tar-bytes" > "$SNAP_OUT/deployments/$NAME/volumes/fake.tar"
+jq -n --arg sha "0000000000000000000000000000000000000000000000000000000000000000" \
+      --arg host "/tmp/fake-vol" --arg cont "/cont" \
+      '{host_path:$host, container_path:$cont, mode:null, sha256:$sha, size_bytes:14}' \
+    > "$SNAP_OUT/deployments/$NAME/volumes/fake.meta.json"
+if bin/nelly snapshot verify --out "$SNAP_OUT" >/dev/null 2>&1; then
+    fail "verify accepted corrupt sha256"
+else
+    pass "verify rejects sha256 mismatch (loud-fail loop intact)"
+fi
+rm -f "$SNAP_OUT/deployments/$NAME/volumes/fake.tar" \
+      "$SNAP_OUT/deployments/$NAME/volumes/fake.meta.json"
+
 # --no-secrets opts out
 SNAP_NS="/tmp/nelly-smoke-snap-ns-$$"
 rm -rf "$SNAP_NS"
 bin/nelly snapshot create --out "$SNAP_NS" --no-quiesce --no-volumes --no-secrets >/dev/null 2>&1
-if tar -tzf "$SNAP_NS/deployments/$NAME/tarball.tar.gz" | grep -qE 'def/(\.env|secrets/)'; then
+if tar -tf "$SNAP_NS/deployments/$NAME/tarball.tar" | grep -qE 'def/(\.env|secrets/)'; then
     fail "--no-secrets leaked secrets"
 else
     pass "--no-secrets keeps secrets out"
@@ -294,6 +327,83 @@ bin/nelly snapshot create --out "$SNAP_OUT" --no-quiesce --no-volumes >/dev/null
 [[ ! -d "${SNAP_OUT}.new" && ! -d "${SNAP_OUT}.old" ]] \
     && pass "snapshot cleans up .new/.old siblings" \
     || fail "snapshot left ${SNAP_OUT}.new or .old behind"
+
+# Hardening: backup.skip_volumes config field validates and the snapshot
+# code path skips matching volumes (recorded in skipped-volumes.json).
+SKIP_DEP="smoketest-skipvol-$$"
+bin/nelly -y init "$SKIP_DEP" >/dev/null 2>&1
+bin/nelly set "$SKIP_DEP" '.volumes' '["/tmp/skipvol-data-'$$':/data"]' >/dev/null 2>&1
+bin/nelly set "$SKIP_DEP" '.backup.skip_volumes' '["/tmp/skipvol-data-'$$'"]' >/dev/null 2>&1 \
+    && pass "backup.skip_volumes accepted by validator" \
+    || fail "backup.skip_volumes rejected"
+# absolute-path enforcement
+if bin/nelly set "$SKIP_DEP" '.backup.skip_volumes' '["relative/path"]' >/dev/null 2>&1; then
+    fail "backup.skip_volumes accepted a relative path"
+else
+    pass "backup.skip_volumes rejects relative paths"
+fi
+# '..' enforcement
+if bin/nelly set "$SKIP_DEP" '.backup.skip_volumes' '["/tmp/../etc"]' >/dev/null 2>&1; then
+    fail "backup.skip_volumes accepted '..'"
+else
+    pass "backup.skip_volumes rejects '..'"
+fi
+# Back to the valid value for the snapshot run.
+bin/nelly set "$SKIP_DEP" '.backup.skip_volumes' '["/tmp/skipvol-data-'$$'"]' >/dev/null 2>&1
+mkdir -p "/tmp/skipvol-data-$$"
+echo "data" > "/tmp/skipvol-data-$$/file"
+SKIP_OUT="/tmp/nelly-smoke-snap-skip-$$"
+rm -rf "$SKIP_OUT"
+bin/nelly snapshot create --out "$SKIP_OUT" --no-quiesce --only "$SKIP_DEP" >/dev/null 2>&1
+[[ -f "$SKIP_OUT/deployments/$SKIP_DEP/volumes/skipped-volumes.json" ]] \
+    && pass "skip_volumes recorded in skipped-volumes.json" \
+    || fail "no skipped-volumes.json (skip_volumes not honored)"
+# And the would-be-tarred file is NOT present
+if find "$SKIP_OUT/deployments/$SKIP_DEP/volumes" -name '*.tar' 2>/dev/null | grep -q .; then
+    fail "skip_volumes still produced a tarball"
+else
+    pass "skip_volumes prevented quiesce-tar"
+fi
+rm -rf "/tmp/skipvol-data-$$" "$SKIP_OUT" "containers/$SKIP_DEP"
+
+# Hardening: a pre_snapshot hook that exits non-zero must fail the
+# deployment (rc captured correctly) AND make the whole `snapshot create`
+# exit non-zero — that's what trips the backup runner's hard-fail.
+FAIL_DEP="smoketest-failhook-$$"
+bin/nelly -y init "$FAIL_DEP" >/dev/null 2>&1
+mkdir -p "containers/$FAIL_DEP/def/hooks"
+cat > "containers/$FAIL_DEP/def/hooks/bad.sh" <<'BAD_HOOK_EOF'
+#!/usr/bin/env bash
+exit 7
+BAD_HOOK_EOF
+chmod +x "containers/$FAIL_DEP/def/hooks/bad.sh"
+bin/nelly set "$FAIL_DEP" '.hooks.pre_snapshot' './def/hooks/bad.sh' >/dev/null
+FAIL_OUT="/tmp/nelly-smoke-snap-fail-$$"
+rm -rf "$FAIL_OUT"
+# Capture both stderr and exit code without aborting the smoke run under
+# set -e — the WHOLE POINT of this test is that the command exits non-zero.
+fail_out_text=""
+fail_rc=0
+fail_out_text="$(bin/nelly snapshot create --out "$FAIL_OUT" --no-quiesce --no-volumes --only "$FAIL_DEP" 2>&1)" || fail_rc=$?
+if (( fail_rc != 0 )); then
+    pass "pre_snapshot failure makes snapshot create exit non-zero ($fail_rc)"
+else
+    fail "pre_snapshot failed but snapshot create returned 0"
+fi
+if echo "$fail_out_text" | grep -q 'rc=7'; then
+    pass "pre_snapshot rc=7 propagates into the error log"
+else
+    fail "pre_snapshot rc not captured (got: $fail_out_text)"
+fi
+if [[ -f "$FAIL_OUT/snapshot.json" ]] && \
+   jq -e --arg n "$FAIL_DEP" '.results[] | select(.deployment == $n) | .outcome == "failed"' \
+        "$FAIL_OUT/snapshot.json" >/dev/null; then
+    pass "snapshot.json records failed deployment"
+else
+    fail "snapshot.json did not record failure"
+fi
+rm -rf "containers/$FAIL_DEP" "$FAIL_OUT"
+
 # install-hook should produce an executable script we can read.
 HOOK_DIR="/tmp/nelly-smoke-hookdir-$$"
 mkdir -p "$HOOK_DIR"
@@ -301,6 +411,11 @@ bin/nelly snapshot install-hook --hook-dir "$HOOK_DIR" --name 99-test >/dev/null
 [[ -x "$HOOK_DIR/99-test" ]] && pass "install-hook drops an executable script" || fail "install-hook"
 grep -q 'snapshot create' "$HOOK_DIR/99-test" \
     && pass "installed hook invokes snapshot create" || fail "hook content"
+# Hardening: the hook is strict-mode (set -euo pipefail) so any failure
+# inside `nelly snapshot create` (including the internal verify) propagates
+# out as a non-zero exit — that's what makes the backup runner abort.
+grep -q 'set -euo pipefail' "$HOOK_DIR/99-test" \
+    && pass "installed hook uses strict mode" || fail "hook missing strict mode"
 bin/nelly snapshot uninstall-hook --hook-dir "$HOOK_DIR" --name 99-test >/dev/null 2>&1
 [[ ! -e "$HOOK_DIR/99-test" ]] && pass "uninstall-hook removes the script" || fail "uninstall-hook"
 rm -rf "$SNAP_OUT" "$SNAP_NS" "$HOOK_DIR"

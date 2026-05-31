@@ -47,6 +47,10 @@
     "post_snapshot": ""
   },
 
+  "backup": {
+    "skip_volumes": []
+  },
+
   "packages": [
     "git",
     "libpq-dev",
