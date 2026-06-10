@@ -255,6 +255,17 @@ bin/nelly restore "$TARBALL" --as "$REST" >/dev/null 2>&1
 
 # ----------------------------------------------------------------------------
 section "snapshot bundle"
+
+# Bare `nelly snapshot` must print usage, NOT run a (mutating, container-
+# stopping) create as the no-arg default.
+bare_rc=0
+bare_out="$(bin/nelly snapshot 2>&1)" || bare_rc=$?
+if (( bare_rc == 0 )) && grep -q 'snapshot.sh create' <<<"$bare_out"; then
+    pass "bare 'nelly snapshot' shows usage (no implicit create)"
+else
+    fail "bare snapshot: rc=$bare_rc out=$bare_out"
+fi
+
 SNAP_OUT="/tmp/nelly-smoke-snap-$$"
 rm -rf "$SNAP_OUT"
 # --no-volumes because the smoketest deployment has none, --no-quiesce
@@ -312,6 +323,16 @@ fi
 rm -f "$SNAP_OUT/deployments/$NAME/volumes/fake.tar" \
       "$SNAP_OUT/deployments/$NAME/volumes/fake.meta.json"
 
+# An orphan volume tar with no meta.json is a half-written artifact (e.g.
+# interrupted run) and must fail verify too.
+touch "$SNAP_OUT/deployments/$NAME/volumes/orphan.tar"
+if bin/nelly snapshot verify --out "$SNAP_OUT" >/dev/null 2>&1; then
+    fail "verify accepted an orphan volume tar (no meta.json)"
+else
+    pass "verify rejects orphan volume tar"
+fi
+rm -f "$SNAP_OUT/deployments/$NAME/volumes/orphan.tar"
+
 # --no-secrets opts out
 SNAP_NS="/tmp/nelly-smoke-snap-ns-$$"
 rm -rf "$SNAP_NS"
@@ -366,6 +387,56 @@ else
 fi
 rm -rf "/tmp/skipvol-data-$$" "$SKIP_OUT" "containers/$SKIP_DEP"
 
+# A declared volume whose host path is missing must FAIL the deployment
+# snapshot — a silently incomplete bundle is the worst possible outcome.
+MISSVOL_DEP="smoketest-missvol-$$"
+bin/nelly -y init "$MISSVOL_DEP" >/dev/null 2>&1
+bin/nelly set "$MISSVOL_DEP" '.volumes' '["/tmp/definitely-missing-'$$':/data"]' >/dev/null 2>&1
+MISSVOL_OUT="/tmp/nelly-smoke-snap-missvol-$$"
+missvol_rc=0
+bin/nelly snapshot create --out "$MISSVOL_OUT" --no-quiesce --only "$MISSVOL_DEP" >/dev/null 2>&1 || missvol_rc=$?
+(( missvol_rc != 0 )) \
+    && pass "missing volume host path fails the snapshot (rc=$missvol_rc)" \
+    || fail "missing volume path reported success"
+jq -e --arg n "$MISSVOL_DEP" '.results[] | select(.deployment==$n) | .outcome == "failed"' \
+    "$MISSVOL_OUT/snapshot.json" >/dev/null 2>&1 \
+    && pass "snapshot.json marks missing-volume deployment failed" \
+    || fail "snapshot.json did not record the volume failure"
+rm -rf "$MISSVOL_OUT" "${MISSVOL_OUT}.lock" "containers/$MISSVOL_DEP"
+
+# --only with a bogus name must die, not produce an empty bundle that
+# reports success.
+if bin/nelly snapshot create --out "/tmp/nelly-smoke-snap-bogus-$$" --no-quiesce \
+        --only "no-such-deployment-$$" >/dev/null 2>&1; then
+    fail "--only with a bogus name was accepted"
+else
+    pass "--only with a bogus name dies"
+fi
+rm -rf "/tmp/nelly-smoke-snap-bogus-$$" "/tmp/nelly-smoke-snap-bogus-$$.lock" \
+       "/tmp/nelly-smoke-snap-bogus-$$.new" 2>/dev/null || true
+
+# A corrupt config.json in ONE deployment must not abort the whole bundle:
+# create still completes (and exits non-zero), and the fleet manifest
+# records an error entry for the bad deployment.
+CORRUPT_DEP="smoketest-corrupt-$$"
+mkdir -p "containers/$CORRUPT_DEP/def"
+echo '{ this is not json' > "containers/$CORRUPT_DEP/def/config.json"
+CORRUPT_OUT="/tmp/nelly-smoke-snap-corrupt-$$"
+corrupt_rc=0
+bin/nelly snapshot create --out "$CORRUPT_OUT" --no-quiesce --no-volumes \
+    --only "$CORRUPT_DEP" >/dev/null 2>&1 || corrupt_rc=$?
+[[ -f "$CORRUPT_OUT/fleet-manifest.json" ]] \
+    && pass "corrupt config: bundle still completes" \
+    || fail "corrupt config aborted the whole bundle"
+(( corrupt_rc != 0 )) \
+    && pass "corrupt config: create exits non-zero ($corrupt_rc)" \
+    || fail "corrupt config reported success"
+jq -e --arg n "$CORRUPT_DEP" '.deployments[] | select(.name==$n) | has("error")' \
+    "$CORRUPT_OUT/fleet-manifest.json" >/dev/null 2>&1 \
+    && pass "fleet-manifest records the corrupt deployment's error" \
+    || fail "fleet-manifest missing the error entry"
+rm -rf "$CORRUPT_OUT" "${CORRUPT_OUT}.lock" "containers/$CORRUPT_DEP"
+
 # Hardening: a pre_snapshot hook that exits non-zero must fail the
 # deployment (rc captured correctly) AND make the whole `snapshot create`
 # exit non-zero — that's what trips the backup runner's hard-fail.
@@ -402,7 +473,7 @@ if [[ -f "$FAIL_OUT/snapshot.json" ]] && \
 else
     fail "snapshot.json did not record failure"
 fi
-rm -rf "containers/$FAIL_DEP" "$FAIL_OUT"
+rm -rf "containers/$FAIL_DEP" "$FAIL_OUT" "${FAIL_OUT}.lock"
 
 # install-hook should produce an executable script we can read.
 HOOK_DIR="/tmp/nelly-smoke-hookdir-$$"
@@ -418,7 +489,7 @@ grep -q 'set -euo pipefail' "$HOOK_DIR/99-test" \
     && pass "installed hook uses strict mode" || fail "hook missing strict mode"
 bin/nelly snapshot uninstall-hook --hook-dir "$HOOK_DIR" --name 99-test >/dev/null 2>&1
 [[ ! -e "$HOOK_DIR/99-test" ]] && pass "uninstall-hook removes the script" || fail "uninstall-hook"
-rm -rf "$SNAP_OUT" "$SNAP_NS" "$HOOK_DIR"
+rm -rf "$SNAP_OUT" "${SNAP_OUT}.lock" "$SNAP_NS" "${SNAP_NS}.lock" "$HOOK_DIR"
 
 # ----------------------------------------------------------------------------
 section "all (multi-deployment)"

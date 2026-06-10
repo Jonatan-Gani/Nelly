@@ -89,11 +89,12 @@ case "$sub" in
         (( NO_COMPRESS )) || TAR_FLAGS+=(-z)
         if (( DETERMINISTIC )); then
             # --sort=name removes ls-order non-determinism. --numeric-owner
-            # avoids per-host uid/gid name resolution. Mtime is intentionally
-            # NOT zeroed: unchanged file content has unchanged mtime, so the
-            # tar stream is still stable; zeroing would break post-restore
-            # tooling that checks file ages.
-            TAR_FLAGS+=(--sort=name --numeric-owner)
+            # avoids per-host uid/gid name resolution. --format=gnu pins the
+            # archive format so different tar builds emit identical streams.
+            # Mtime is intentionally NOT zeroed: unchanged file content has
+            # unchanged mtime, so the tar stream is still stable; zeroing
+            # would break post-restore tooling that checks file ages.
+            TAR_FLAGS+=(--format=gnu --sort=name --numeric-owner)
         fi
 
         (( QUIET )) || info "writing backup → $OUT"

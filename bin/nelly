@@ -49,7 +49,7 @@ $(_bold "Share / migrate / back up")
   $(_bold "nelly import <file>")        $(_dim "# create a deployment from a JSON export")
   $(_bold "nelly clone  <src> <dest>")  $(_dim "# fork an existing deployment")
   $(_bold "nelly backup <name>")        $(_dim "# tarball for disaster recovery")
-  $(_bold "nelly snapshot")             $(_dim "# build restore bundle at /var/backups/nelly (for restic et al.)")
+  $(_bold "nelly snapshot create")      $(_dim "# build restore bundle at /var/backups/nelly (for restic et al.)")
 
 $(_bold "Across many deployments")
   $(_bold "nelly all list")             $(_dim "# tag-aware listing")
@@ -343,9 +343,14 @@ Default output: $(_bold "/var/backups/nelly") (override with --out or NELLY_BACK
 
     snapshot uninstall-hook [--hook-dir DIR] [--name NAME]
 
+$(_bold "Exit codes (create):")  0 bundle complete and verified · 1 one or more
+    deployments failed · 3 bundle failed self-verify. The installed hook is
+    strict-mode, so any non-zero aborts the off-site backup run.
+
 $(_bold "Bundle layout (at \$OUT, mode 0700):")
     BUNDLE_VERSION            schema version ("1")
     README.txt                restore steps
+    snapshot.log              full log of the run that built this bundle
     snapshot.json             generation metadata + per-deployment results
     fleet-manifest.json       images, digests, ports, networks, volumes,
                               env-file paths, app commits
@@ -747,7 +752,9 @@ case "$cmd" in
 
     # ---- fleet-wide restore bundle (for restic / borg / ...) -----------
     snapshot)
-        sub="${1:-create}"; shift || true
+        # No-arg default is HELP, not create: bare `nelly snapshot` must not
+        # quiesce (stop/start) every container as a side effect of a typo.
+        sub="${1:-help}"; shift || true
         case "$sub" in
             create|verify|list|ls|status|install-hook|uninstall-hook|help|-h|--help|"")
                 "$LIB/snapshot.sh" "$sub" "$@" ;;

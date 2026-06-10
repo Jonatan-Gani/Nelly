@@ -15,7 +15,8 @@
 #   8. second deploy produces a second release; image-prune kicks in
 #   9. nelly release restore reverts to first release
 #  10. nelly stop / start round-trip
-#  11. nelly bot notify is callable (without a real token, so just check syntax)
+#  11. nelly snapshot: quiesce → volume tar → restart guard, verify passes
+#  12. nelly bot notify is callable (without a real token, so just check syntax)
 #
 # Run: bash tests/e2e.sh
 
@@ -52,6 +53,9 @@ cleanup() {
     fi
     docker images "$NAME" -q 2>/dev/null | xargs -r docker image rm -f >/dev/null 2>&1 || true
     rm -rf "$DEPLOY_DIR" "$SRC_DIR"
+    rm -rf "/tmp/nelly-e2e-vol-$$" "/tmp/nelly-e2e-snap-$$" \
+           "/tmp/nelly-e2e-snap-$$.lock" "/tmp/nelly-e2e-snap-$$.new" \
+           "/tmp/nelly-e2e-snap-$$.old" 2>/dev/null || true
 }
 trap cleanup EXIT
 
@@ -195,6 +199,48 @@ bin/nelly stop  "$NAME" >/dev/null
 bin/nelly start "$NAME" >/dev/null
 [[ "$(docker inspect -f '{{.State.Running}}' "$NAME")" == "true" ]] \
     && pass "start works" || fail "start"
+
+# ----------------------------------------------------------------------------
+section "snapshot: quiesce + volume tar + restart guard (real docker)"
+
+E2E_VOL="/tmp/nelly-e2e-vol-$$"
+E2E_SNAP="/tmp/nelly-e2e-snap-$$"
+mkdir -p "$E2E_VOL"
+echo "volume-data" > "$E2E_VOL/data.txt"
+
+# Re-run the container with a bind-mount so the snapshot has a volume to
+# quiesce-tar.
+bin/nelly set "$NAME" '.volumes' "[\"$E2E_VOL:/data\"]" >/dev/null
+bin/nelly run "$NAME" >/dev/null 2>&1
+[[ "$(docker inspect -f '{{.State.Running}}' "$NAME")" == "true" ]] \
+    && pass "container re-ran with volume mounted" || fail "re-run with volume"
+
+if bin/nelly snapshot create --out "$E2E_SNAP" --only "$NAME" >/dev/null 2>&1; then
+    pass "snapshot create (quiesced) succeeded"
+else
+    fail "snapshot create failed"
+fi
+
+# The cardinal rule: the container must be RUNNING again after the quiesce.
+[[ "$(docker inspect -f '{{.State.Running}}' "$NAME")" == "true" ]] \
+    && pass "container running again after quiesced snapshot" \
+    || fail "container left stopped after snapshot"
+
+vol_tars="$(find "$E2E_SNAP/deployments/$NAME/volumes" -name '*.tar' 2>/dev/null | wc -l | tr -d ' ')"
+[[ "$vol_tars" == "1" ]] && pass "volume tarball captured" || fail "expected 1 volume tar, got $vol_tars"
+vol_metas="$(find "$E2E_SNAP/deployments/$NAME/volumes" -name '*.meta.json' 2>/dev/null | wc -l | tr -d ' ')"
+[[ "$vol_metas" == "1" ]] && pass "volume meta captured" || fail "expected 1 meta, got $vol_metas"
+
+bin/nelly snapshot verify --out "$E2E_SNAP" >/dev/null 2>&1 \
+    && pass "snapshot verify passes" || fail "snapshot verify failed"
+
+snap_outcome="$(jq -r --arg n "$NAME" \
+    '.results[] | select(.deployment==$n) | .outcome' "$E2E_SNAP/snapshot.json" 2>/dev/null)"
+[[ "$snap_outcome" == "success" ]] \
+    && pass "snapshot.json outcome=success" || fail "snapshot outcome=$snap_outcome"
+
+rm -rf "$E2E_SNAP" "${E2E_SNAP}.lock" "$E2E_VOL"
+bin/nelly set "$NAME" '.volumes' '[]' >/dev/null
 
 # ----------------------------------------------------------------------------
 section "doctor + explain + cron + status all run without error on a real deployment"

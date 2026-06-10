@@ -9,15 +9,19 @@
 # Layout at $OUT (default: /var/backups/nelly):
 #   BUNDLE_VERSION              "1"
 #   README.txt                  restore instructions
+#   snapshot.log                full log of the run that built this bundle
 #   snapshot.json               generation metadata + per-deployment outcomes
 #   fleet-manifest.json         the "what is running" source of truth
 #   deployments/<name>/
 #     tarball.tar               full deployment dir (uncompressed for restic dedup)
 #     container-inspect.json    docker inspect, if the container exists
-#     image-digest.txt          image reference pinned to @sha256:... (when resolvable)
+#     image-digest.txt          line 1: image ref (pinned @sha256 when pushed);
+#                               line 2 (local builds): the local image ID
 #     volumes/<slug>.tar        uncompressed, deterministic tar of each declared
-#                               host bind-mount, taken while quiesced
-#     volumes/<slug>.meta.json  host_path, container_path, mode, sha256, size_bytes
+#                               host bind-mount, taken while quiesced (slug =
+#                               sanitized path + 8-char hash, collision-proof)
+#     volumes/<slug>.meta.json  host_path, container_path, mode, sha256,
+#                               size_bytes, torn (true if it changed mid-read)
 #     dumps/                    where hooks.pre_snapshot can drop pg_dump/mysqldump output
 #   nelly-state/
 #     bot.tar                   $NELLY_ROOT/bot if present (token, allowed users, audit log)
@@ -142,7 +146,7 @@ _restart_guard() {
         for c in "${NELLY_SNAPSHOT_STOPPED[@]}"; do
             [[ -z "$c" ]] && continue
             err "  cleanup: restarting $c (guard)"
-            docker start "$c" >/dev/null 2>&1 \
+            docker start "$c" >/dev/null \
                 || err "  cleanup: docker start failed for $c — MANUAL INTERVENTION REQUIRED"
         done
         NELLY_SNAPSHOT_STOPPED=()
@@ -150,29 +154,45 @@ _restart_guard() {
     return "$rc"
 }
 
-# Resolve an image reference to a fully-pinned image@sha256:... form.
-# Falls back to the image tag if no digest is known locally.
+# Repo digest (repo@sha256:...) — only exists for images that were ever
+# pushed to / pulled from a registry; "" for purely local builds.
+_image_repo_digest() {
+    local image="$1"
+    [[ -n "$image" ]] || { echo ""; return; }
+    command -v docker >/dev/null 2>&1 || { echo ""; return; }
+    local digest
+    digest="$(docker inspect --type=image -f '{{index .RepoDigests 0}}' "$image" 2>/dev/null || true)"
+    if [[ "$digest" == *@sha256:* ]]; then
+        printf '%s' "$digest"
+    else
+        echo ""
+    fi
+}
+
+# Local image ID (sha256:...) — present for any image the daemon knows,
+# including never-pushed local builds. The verification anchor when no
+# repo digest exists.
+_image_id() {
+    local image="$1"
+    [[ -n "$image" ]] || { echo ""; return; }
+    command -v docker >/dev/null 2>&1 || { echo ""; return; }
+    docker inspect --type=image -f '{{.Id}}' "$image" 2>/dev/null || echo ""
+}
+
+# Best single human-readable reference for image-digest.txt: tag@sha256
+# when a repo digest exists, otherwise the plain image reference (the
+# structured manifest fields carry the image ID in that case).
 _pin_image_digest() {
     local image="$1"
     [[ -n "$image" ]] || { echo ""; return; }
-    command -v docker >/dev/null 2>&1 || { echo "$image"; return; }
     local digest
-    digest="$(docker inspect --type=image -f '{{index .RepoDigests 0}}' "$image" 2>/dev/null || true)"
-    if [[ -n "$digest" && "$digest" == *@sha256:* ]]; then
-        # If $image already carries a tag, preserve it; otherwise emit repo@digest.
+    digest="$(_image_repo_digest "$image")"
+    if [[ -n "$digest" ]]; then
         case "$image" in
             *@sha256:*) printf '%s' "$image" ;;
             *:*)        printf '%s@%s' "$image" "${digest##*@}" ;;
             *)          printf '%s' "$digest" ;;
         esac
-        return
-    fi
-    # No RepoDigest available (locally-built image that was never pushed) — at
-    # least record the image ID so a reconstruction has *something* to verify.
-    local id
-    id="$(docker inspect --type=image -f '{{.Id}}' "$image" 2>/dev/null || true)"
-    if [[ -n "$id" ]]; then
-        printf '%s (id=%s)' "$image" "$id"
     else
         printf '%s' "$image"
     fi
@@ -189,12 +209,16 @@ _run_snapshot_hook() {
 }
 
 # Return 0 if $needle is one of the absolute paths in `.backup.skip_volumes`.
+# Trailing slashes are normalized on both sides so "/data/" in the skip list
+# still matches a declared volume host path of "/data" — a silent mismatch
+# here would double-capture a database the user explicitly excluded.
 _volume_is_skipped() {
     local needle="$1" config="$2"
     [[ -f "$config" ]] || return 1
+    needle="${needle%/}"
     local match
     match="$(jq -r --arg n "$needle" \
-        '(.backup.skip_volumes // []) | map(select(. == $n)) | length' "$config" 2>/dev/null || echo 0)"
+        '(.backup.skip_volumes // []) | map(select((. | rtrimstr("/")) == $n)) | length' "$config" 2>/dev/null || echo 0)"
     [[ "$match" != "0" ]]
 }
 
@@ -209,10 +233,11 @@ _deployment_manifest_entry() {
     local config="$dir/def/config.json"
     [[ -f "$config" ]] || { echo "{}"; return; }
 
-    local container_name image image_pinned base_image
+    local container_name image image_digest image_id base_image
     container_name="$(jqget "$config" '.container_name' "$name")"
     image="$(cat "$dir/def/last_image.txt" 2>/dev/null || echo "")"
-    image_pinned="$(_pin_image_digest "$image")"
+    image_digest="$(_image_repo_digest "$image")"
+    image_id="$(_image_id "$image")"
     base_image="$(jqget "$config" '.base_image' '')"
 
     local state="absent" running_image_id="" started_at=""
@@ -246,7 +271,8 @@ _deployment_manifest_entry() {
         --arg name "$name" \
         --arg cn "$container_name" \
         --arg img "$image" \
-        --arg pin "$image_pinned" \
+        --arg dig "$image_digest" \
+        --arg iid "$image_id" \
         --arg base "$base_image" \
         --arg state "$state" \
         --arg rimg "$running_image_id" \
@@ -257,8 +283,9 @@ _deployment_manifest_entry() {
         '{
             name:           $name,
             container_name: $cn,
-            image:          (if $img == "" then null else $img end),
-            image_pinned:   (if $pin == "" then null else $pin end),
+            image:             (if $img == "" then null else $img end),
+            image_repo_digest: (if $dig == "" then null else $dig end),
+            image_id:          (if $iid == "" then null else $iid end),
             base_image:     (if $base == "" then null else $base end),
             state:          $state,
             running_image_id: (if $rimg == "" then null else $rimg end),
@@ -343,10 +370,21 @@ _snapshot_one_deployment() {
     fi
 
     # 4. Image digest pinning — the "redeploy from git" reproducibility anchor.
-    local image image_pinned
+    #    Line 1: best reference (tag@sha256 when a repo digest exists).
+    #    Line 2 (local-only builds): the local image ID, since nelly-built
+    #    images are never pushed and have no repo digest to pin by.
+    local image image_pinned image_id
     image="$(cat "$dir/def/last_image.txt" 2>/dev/null || echo "")"
     image_pinned="$(_pin_image_digest "$image")"
-    [[ -n "$image_pinned" ]] && printf '%s\n' "$image_pinned" > "$dest/image-digest.txt"
+    image_id="$(_image_id "$image")"
+    if [[ -n "$image_pinned" ]]; then
+        {
+            printf '%s\n' "$image_pinned"
+            if [[ "$image_pinned" != *@sha256:* && -n "$image_id" ]]; then
+                printf '%s\n' "$image_id"
+            fi
+        } > "$dest/image-digest.txt"
+    fi
 
     # 5. Bind-mount volumes — quiesce, tar, restart.
     local vol_rc=0
@@ -363,10 +401,12 @@ _snapshot_one_deployment() {
     _run_snapshot_hook "$dir" post_snapshot "$dest" \
         || warn "  post_snapshot hook failed for $name"
 
-    # If quiesce failed to restart, that's a HARD failure even if the tar
-    # files are intact — the operator needs to know.
-    if (( vol_rc == 2 )); then
-        return 2
+    # Any volume failure fails the deployment snapshot: rc=2 means the
+    # container did not come back up; rc=1 means a tarball is missing or
+    # broken. Either way the bundle must NOT report success — a silently
+    # incomplete backup is the worst outcome this tool can produce.
+    if (( vol_rc != 0 )); then
+        return "$vol_rc"
     fi
     return 0
 }
@@ -419,20 +459,23 @@ _snapshot_volumes() {
         && docker inspect "$container_name" >/dev/null 2>&1 \
         && [[ "$(docker inspect -f '{{.State.Running}}' "$container_name" 2>/dev/null)" == "true" ]]; then
         info "  quiescing $container_name (stop --time=$quiesce_time)"
-        if docker stop --time="$quiesce_time" "$container_name" >/dev/null 2>&1; then
+        # Register with the always-restart guard BEFORE issuing the stop: if
+        # we're killed while `docker stop` is in flight, the daemon may still
+        # finish stopping the container after our CLI dies — the guard then
+        # restarts it. `docker start` on an already-running container is a
+        # harmless no-op, so tracking early is safe in every interleaving.
+        _track_stopped "$container_name"
+        if docker stop --time="$quiesce_time" "$container_name" >/dev/null; then
             stopped=1
-            # Register with the always-restart guard immediately, BEFORE any
-            # tar runs — that way a die / SIGINT / disk-full mid-tar still
-            # brings the container back up via the EXIT trap.
-            _track_stopped "$container_name"
         else
             warn "  failed to stop $container_name; snapshotting live (torn-file risk)"
+            _untrack_stopped "$container_name"
         fi
     elif (( ! do_quiesce )); then
         warn "  --no-quiesce: tarring live volumes for $container_name (torn-file risk)"
     fi
 
-    local container_side mode slug tarball meta sha size
+    local container_side mode slug tarball meta sha size tar_rc torn
     for v in "${TAR_VOLS[@]}"; do
         host_side="${v%%:*}"
         local rest="${v#*:}"
@@ -444,7 +487,9 @@ _snapshot_volumes() {
             rc=1
             continue
         fi
-        slug="$(_slugify "$host_side")"
+        # Slug = sanitized path + 8-char hash: the hash disambiguates paths
+        # that sanitize to the same string (/data/a_b vs /data/a/b).
+        slug="$(_slugify "$host_side")-$(printf '%s' "$host_side" | sha256sum | cut -c1-8)"
         tarball="$dest/volumes/${slug}.tar"
         meta="$dest/volumes/${slug}.meta.json"
         info "    tarring $host_side → $(basename "$tarball")"
@@ -452,14 +497,24 @@ _snapshot_volumes() {
         # volumes across runs (a gzip layer here would re-upload everything
         # nightly even for one-byte changes). --sort=name removes filesystem
         # ls-order variability; --numeric-owner removes per-host uid/gid
-        # name-resolution variability.
-        if ! tar --warning=no-file-changed \
-                 --sort=name --numeric-owner \
-                 -cf "$tarball" \
-                 -C "$(dirname "$host_side")" "$(basename "$host_side")" 2>/dev/null; then
-            warn "    tar failed for $host_side"
+        # name-resolution variability; --format=gnu pins the archive format
+        # so different tar builds emit identical streams.
+        tar_rc=0
+        tar --warning=no-file-changed --format=gnu \
+            --sort=name --numeric-owner \
+            -cf "$tarball" \
+            -C "$(dirname "$host_side")" "$(basename "$host_side")" || tar_rc=$?
+        torn=false
+        if (( tar_rc > 1 )); then
+            warn "    tar failed for $host_side (rc=$tar_rc)"
             rc=1
             continue
+        elif (( tar_rc == 1 )); then
+            # GNU tar exit 1 = a file changed while being read — only
+            # possible when tarring live. Keep the tarball (incomplete is
+            # better than nothing) but flag it so the operator knows.
+            warn "    $host_side changed while tarring (live; possibly torn)"
+            torn=true
         fi
         sha="$(sha256sum "$tarball" | cut -d' ' -f1)"
         size="$(stat -c %s "$tarball")"
@@ -469,11 +524,13 @@ _snapshot_volumes() {
             --arg mode "$mode" \
             --arg sha "$sha" \
             --argjson size "$size" \
+            --argjson torn "$torn" \
             '{host_path: $host,
               container_path: $cont,
               mode: (if $mode == "" then null else $mode end),
               sha256: $sha,
-              size_bytes: $size}' > "$meta"
+              size_bytes: $size,
+              torn: $torn}' > "$meta"
     done
 
     # Restart, verify, then untrack. Untrack is last so the guard is still
@@ -481,7 +538,7 @@ _snapshot_volumes() {
     # actually running.
     if (( stopped )); then
         info "  restarting $container_name"
-        if docker start "$container_name" >/dev/null 2>&1; then
+        if docker start "$container_name" >/dev/null; then
             local running
             running="$(docker inspect -f '{{.State.Running}}' "$container_name" 2>/dev/null || echo false)"
             if [[ "$running" == "true" ]]; then
@@ -512,8 +569,8 @@ _snapshot_nelly_state() {
     if [[ -d "$NELLY_ROOT/bot" ]]; then
         info "snapshotting bot/ state"
         # Uncompressed + deterministic — same restic dedup story.
-        tar --warning=no-file-changed --sort=name --numeric-owner \
-            -cf "$dest/bot.tar" -C "$NELLY_ROOT" bot 2>/dev/null \
+        tar --warning=no-file-changed --format=gnu --sort=name --numeric-owner \
+            -cf "$dest/bot.tar" -C "$NELLY_ROOT" bot \
             || warn "  bot/ tarball failed"
     fi
 
@@ -540,6 +597,10 @@ What's here
 BUNDLE_VERSION
     Schema version of this bundle (currently "1").
 
+snapshot.log
+    Full log of the run that built this bundle, including tar / docker
+    diagnostics — check here first when a nightly run failed.
+
 snapshot.json
     Generation metadata: timestamp, host, nelly version, durations, and
     per-deployment success/failure record.
@@ -558,17 +619,23 @@ deployments/<name>/tarball.tar
 
 deployments/<name>/container-inspect.json
     Output of `docker inspect <container>` at snapshot time. Captures the
-    exact image digest, mounts, networks, and runtime state.
+    exact image digest, mounts, networks, and runtime state. NOTE: includes
+    the container's environment, i.e. its secrets — which is why this
+    bundle is mode 0700 and must only leave the machine inside the
+    client-side-encrypted off-site repo.
 
 deployments/<name>/image-digest.txt
-    The image reference pinned to @sha256:... so a rebuild produces the
-    same bits, not a moving :latest target.
+    Line 1: the image reference, pinned to @sha256:... when a repo digest
+    exists. Line 2 (present for never-pushed local builds): the local
+    image ID — the verification anchor when there is no registry digest.
 
 deployments/<name>/volumes/<slug>.tar
     One tarball per declared host bind-mount, taken while the container was
     stopped (unless --no-quiesce was used). Uncompressed and deterministic
-    (--sort=name --numeric-owner) for dedup. The .meta.json sibling lists
-    host_path, container_path, mode, sha256, size.
+    (--format=gnu --sort=name --numeric-owner) for dedup. The .meta.json
+    sibling lists host_path, container_path, mode, sha256, size, and a
+    `torn` flag (true if the file changed while being read — only possible
+    for live, unquiesced tars).
 
 deployments/<name>/volumes/skipped-volumes.json
     Volumes listed in `.backup.skip_volumes` — assumed to be covered by a
@@ -643,14 +710,44 @@ create_snapshot() {
 
     require_cmd jq tar sha256sum
 
+    # A trailing slash would turn "${out}.new" into a path INSIDE the
+    # bundle and break the swap.
+    out="${out%/}"
+
     # Files / dirs created from here on land at 0600 / 0700 by default.
     # The bundle holds cleartext secrets between off-site runs.
     umask 077
 
-    # Arm the always-restart guard immediately, BEFORE we touch any
-    # container. From this point until normal exit, any container we stop
-    # is registered with the guard and restarted no matter how we exit.
-    trap _restart_guard EXIT INT TERM
+    # The atomic swap (rename current → .old, .new → current) needs write
+    # permission on the bundle's PARENT directory. Catch that up front with
+    # a clear message instead of a cryptic mkdir failure halfway through.
+    local out_parent; out_parent="$(dirname "$out")"
+    [[ -d "$out_parent" && -w "$out_parent" ]] \
+        || die "no write access to $out_parent (needed to stage and swap $out) — run as root or pass --out under a writable parent"
+
+    # One snapshot at a time per bundle path: concurrent runs would share
+    # the same .new staging dir and corrupt each other. FD 201 because
+    # with_lock uses FD 200 for the per-deployment lock.
+    if command -v flock >/dev/null 2>&1; then
+        exec 201>"${out}.lock"
+        flock -n 201 || die "another snapshot run is already in progress (lock: ${out}.lock)"
+    fi
+
+    # Validate --only up front: a typo'd name must fail loudly, not produce
+    # an empty bundle that reports success.
+    local o
+    for o in "${only[@]}"; do
+        [[ -f "$NELLY_ROOT/containers/$o/def/config.json" ]] \
+            || die "--only: no such deployment: $o"
+    done
+
+    # Arm the always-restart guard BEFORE we touch any container. On INT or
+    # TERM the guard must restart whatever we stopped and then EXIT — without
+    # the explicit exit, bash resumes the interrupted loop and tars the
+    # remaining volumes against a now-running container (torn files).
+    trap '_restart_guard' EXIT
+    trap '_restart_guard; trap - EXIT; exit 130' INT
+    trap '_restart_guard; trap - EXIT; exit 143' TERM
 
     # The bundle is built under a sibling .new directory and swapped in
     # atomically at the end. A half-written bundle never replaces the last
@@ -662,13 +759,17 @@ create_snapshot() {
     chmod 700 "$out_new"
     echo "$BUNDLE_VERSION" > "$out_new/BUNDLE_VERSION"
 
+    # Tee everything from here into the bundle itself, so a failed 3am run
+    # leaves its own diagnostics in snapshot.log (tar/docker stderr included).
+    exec > >(log_to "$out_new/snapshot.log") 2>&1
+
     local started_at; started_at="$(_now)"
     local t_start; t_start="$(_secs)"
 
     info "building bundle at $out (staging in $out_new)"
 
     local results='[]'
-    local n_ok=0 n_fail=0
+    local n_ok=0 n_fail=0 n_total=0
 
     while IFS= read -r name; do
         if (( ${#only[@]} > 0 )); then
@@ -680,9 +781,14 @@ create_snapshot() {
             [[ "$e" == "$name" ]] && { info "skipping (excluded): $name"; continue 2; }
         done
 
+        n_total=$((n_total+1))
         local d_start; d_start="$(_secs)"
         local outcome="success" err_msg="" d_rc=0
-        _snapshot_one_deployment \
+        # Serialize with deploys: take the same per-deployment flock that
+        # `nelly deploy` holds, so we never stop a container that a deploy
+        # is mid-way through replacing (and vice versa).
+        with_lock "$NELLY_ROOT/containers/$name" \
+            _snapshot_one_deployment \
             "$name" "$out_new" "$do_quiesce" "$do_volumes" "$do_secrets" "$quiesce_time" \
             || d_rc=$?
         if (( d_rc == 0 )); then
@@ -703,6 +809,10 @@ create_snapshot() {
                    error:(if $err == "" then null else $err end)}]')"
     done < <(_deployments)
 
+    if (( n_total == 0 )); then
+        warn "no deployments were processed — the bundle is empty"
+    fi
+
     # Fleet manifest — one pass over all deployments after the per-deployment
     # snapshots have already captured docker inspect etc.
     info "writing fleet-manifest.json"
@@ -716,7 +826,14 @@ create_snapshot() {
         for e in "${exclude[@]}"; do
             [[ "$e" == "$name" ]] && continue 2
         done
-        local entry; entry="$(_deployment_manifest_entry "$name")"
+        # One corrupt config must not abort the whole fleet manifest — record
+        # the failure as an entry and keep going (mirrors how the snapshot
+        # phase already degrades per-deployment).
+        local entry
+        if ! entry="$(_deployment_manifest_entry "$name")"; then
+            warn "fleet-manifest entry failed for $name (corrupt config?) — recording the error"
+            entry="$(jq -nc --arg n "$name" '{name: $n, error: "manifest generation failed"}')"
+        fi
         manifest="$(echo "$manifest" | jq --argjson e "$entry" '. + [$e]')"
     done < <(_deployments)
 
@@ -758,6 +875,7 @@ create_snapshot() {
         --arg host "$(_host)" \
         --argjson dur "$total_dur" \
         --argjson bytes "${total_bytes:-0}" \
+        --argjson n_total "$n_total" \
         --argjson n_ok "$n_ok" \
         --argjson n_fail "$n_fail" \
         --argjson results "$results" \
@@ -775,6 +893,7 @@ create_snapshot() {
             duration_seconds: $dur,
             host:             $host,
             size_bytes:       $bytes,
+            deployments_total: $n_total,
             deployments_ok:   $n_ok,
             deployments_failed: $n_fail,
             options:          $opts,
@@ -803,7 +922,9 @@ create_snapshot() {
     # backup runner aborts the run.
     local verify_rc=0
     if (( do_verify )); then
-        verify_snapshot --out "$out" >/dev/null 2>&1 || verify_rc=$?
+        # Not silenced: the specific verify failure must land in the bundle
+        # log so a 3am failure is diagnosable without a manual re-run.
+        verify_snapshot --out "$out" || verify_rc=$?
         if (( verify_rc != 0 )); then
             err "snapshot built at $out (${total_dur}s, $summary) but verify FAILED — DO NOT proceed with off-site backup"
             return 3
@@ -851,6 +972,10 @@ verify_snapshot() {
         jq -e . "$out/fleet-manifest.json" >/dev/null \
             || { err "fleet-manifest.json is not valid JSON"; fail=$((fail+1)); }
     fi
+    if [[ -f "$out/snapshot.json" ]]; then
+        jq -e . "$out/snapshot.json" >/dev/null \
+            || { err "snapshot.json is not valid JSON"; fail=$((fail+1)); }
+    fi
 
     local d name vmeta sha actual
     if [[ -d "$out/deployments" ]]; then
@@ -876,7 +1001,32 @@ verify_snapshot() {
                 [[ "$sha" == "$actual" ]] \
                     || { err "$vtar sha256 mismatch (meta:$sha actual:$actual)"; fail=$((fail+1)); }
             done
+            # The reverse direction: a volume tar with no meta.json is a
+            # half-written artifact (e.g. interrupted run) and must not pass.
+            local vtar_orphan stem2
+            for vtar_orphan in "$d/volumes"/*.tar "$d/volumes"/*.tar.gz; do
+                [[ -f "$vtar_orphan" ]] || continue
+                stem2="${vtar_orphan%.tar.gz}"
+                stem2="${stem2%.tar}"
+                [[ -f "$stem2.meta.json" ]] \
+                    || { err "orphan volume tarball without meta: $vtar_orphan"; fail=$((fail+1)); }
+            done
         done
+    fi
+
+    # Cross-check: the manifest and the deployments/ directory must agree —
+    # a deployment present in one but not the other means the bundle and its
+    # source-of-truth document have diverged.
+    if [[ -f "$out/fleet-manifest.json" && -d "$out/deployments" ]]; then
+        local mnames dnames
+        mnames="$(jq -r '.deployments[].name' "$out/fleet-manifest.json" 2>/dev/null | sort)"
+        dnames="$(find "$out/deployments" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' 2>/dev/null | sort)"
+        if [[ "$mnames" != "$dnames" ]]; then
+            err "fleet-manifest deployments do not match deployments/ dirs"
+            err "  manifest: $(tr '\n' ' ' <<<"$mnames")"
+            err "  dirs    : $(tr '\n' ' ' <<<"$dnames")"
+            fail=$((fail+1))
+        fi
     fi
 
     if (( fail == 0 )); then
