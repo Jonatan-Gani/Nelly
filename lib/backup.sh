@@ -33,7 +33,19 @@ case "$sub" in
     backup)
         DEPLOY_DIR="${1:-}"; shift || true
         [[ -d "$DEPLOY_DIR" ]] || die "not a deployment: $DEPLOY_DIR"
-        validate_config "$DEPLOY_DIR" >/dev/null
+        # Deliberately NOT calling validate_config. Backup must preserve
+        # whatever state exists; refusing to back up a deployment because
+        # of a policy rule (e.g. `.allow_dangerous_health_cmd`) is worse
+        # than backing up bad state. Restore re-validates on the
+        # destination, so policy can't be smuggled in silently.
+        #
+        # JSON validity is still checked — fundamentally-broken state
+        # (unparseable config) is worth refusing on, because nothing
+        # downstream can reason about it.
+        if [[ -f "$DEPLOY_DIR/def/config.json" ]]; then
+            jq -e . "$DEPLOY_DIR/def/config.json" >/dev/null \
+                || die "config.json is not valid JSON: $DEPLOY_DIR/def/config.json"
+        fi
 
         OUT=""
         INCLUDE_LOGS=0

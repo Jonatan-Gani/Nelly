@@ -357,7 +357,10 @@ _snapshot_one_deployment() {
     #    mode 0700).
     local backup_args=( "$dir" --out "$dest/tarball.tar" --no-compress --deterministic --quiet )
     (( do_secrets )) && backup_args+=( --include-secrets )
-    if ! "$LIB/backup.sh" backup "${backup_args[@]}" >/dev/null 2>&1; then
+    # NOT silenced: any tar/validation error must land in snapshot.log
+    # (the bundle's own log) so a 3am failure is diagnosable without a
+    # manual re-run. The --quiet flag already suppresses progress chatter.
+    if ! "$LIB/backup.sh" backup "${backup_args[@]}"; then
         err "  tarball failed for $name"
         return 1
     fi
