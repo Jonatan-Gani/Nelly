@@ -477,6 +477,7 @@ HELP_READ = """\
 /releases <n>     deploy history
 /release  <n>     release manifest
 /metrics  <n>     run stats
+/update_check     check if upstream branch has new commits
 /id               your user id"""
 
 HELP_WRITE = """\
@@ -486,7 +487,8 @@ HELP_WRITE = """\
 /runnow           <n> <app>
 /deploy           <n>
 /rollback         <n>
-/release_restore  <n> <id>"""
+/release_restore  <n> <id>
+/update           apply pending upstream updates"""
 
 def cmd_help(_args, allow_writes, **_) -> Response:
     parts = [b("Nelly bot"), "", section("Read-only", HELP_READ)]
@@ -969,6 +971,37 @@ def cmd_rollback(args, _aw, **_) -> Response:
         )
     return fmt_err(rc, raw)
 
+def cmd_update_check(_args, allow_writes, **_) -> Response:
+    """Preview pending upstream commits (the polling timer's question, asked
+    on demand). Read-only — we only do `git fetch` + log inspection. If
+    writes are enabled, surface an Update button that routes through the
+    standard two-tap confirm guard."""
+    rc, raw = run_nelly("check-updates", "check")
+    body = (raw or "").rstrip() or "(no output)"
+    if rc == 0:
+        return f"{b('up to date')}\n{pre(body[-1500:])}"
+    if rc == 1:
+        rows = []
+        if allow_writes:
+            rows.append([("Update now", "cf|up")])
+        rows.append([("Dashboard", "start"), ("Status", "check_updates")])
+        return f"{b('updates available')}\n{pre(body[-1500:])}", kbd(*rows)
+    return f"{b('check failed')}  exit {rc}\n{pre(body[-1500:])}"
+
+def cmd_update(_args, _aw, **_) -> Response:
+    """Apply the pending update via `nelly update`. The pipeline already
+    fetches, smoke-tests, redeploys what needs redeploying, and aborts
+    cleanly on a smoke failure — we just wrap its tail in HTML and surface
+    a Status button when it succeeds."""
+    rc, raw = run_nelly("update")
+    tail = "\n".join((raw or "").splitlines()[-20:]).rstrip() or "(no output)"
+    if rc == 0:
+        return (
+            f"{b('update OK')}\n{pre(tail)}",
+            kbd([("Dashboard", "start"), ("List", "ls")]),
+        )
+    return fmt_err(rc, raw)
+
 def cmd_release_restore(args, _aw, **_) -> Response:
     if len(args) < 2:
         return "usage: /release_restore &lt;name&gt; &lt;rel_id&gt;"
@@ -998,6 +1031,7 @@ CONFIRM_VERB: dict[str, str] = {
     "st": "stop",
     "dp": "deploy",
     "rr": "restore",
+    "up": "update",
 }
 
 def cmd_confirm(args, _aw, **_) -> Response:
@@ -1050,6 +1084,8 @@ COMMANDS: dict[str, tuple[Callable, bool]] = {
     "deploy":         (cmd_deploy,         True),
     "rollback":       (cmd_rollback,       True),
     "release_restore":(cmd_release_restore,True),
+    "update_check":   (cmd_update_check,   False),
+    "update":         (cmd_update,         True),
 }
 
 # Short opcodes used in callback_data (so the 64-byte budget isn't blown).
@@ -1072,6 +1108,8 @@ CB_ALIASES: dict[str, str] = {
     "rb": "rollback",
     "rr": "release_restore",
     "rn": "runnow",
+    "uc": "update_check",
+    "up": "update",
 }
 
 def resolve_cmd(token_str: str) -> str:

@@ -492,6 +492,48 @@ bin/nelly snapshot uninstall-hook --hook-dir "$HOOK_DIR" --name 99-test >/dev/nu
 rm -rf "$SNAP_OUT" "${SNAP_OUT}.lock" "$SNAP_NS" "${SNAP_NS}.lock" "$HOOK_DIR"
 
 # ----------------------------------------------------------------------------
+section "check-updates"
+
+# `check` without --notify is a pure git fetch + compare. On the test repo
+# it should exit 0 (up to date) or 1 (behind) — both are valid; 2 means
+# the fetch itself failed (network), which is fine to tolerate in CI.
+cu_rc=0
+bin/nelly check-updates check >/dev/null 2>&1 || cu_rc=$?
+(( cu_rc == 0 || cu_rc == 1 || cu_rc == 2 )) \
+    && pass "check-updates exits 0/1/2 cleanly (got $cu_rc)" \
+    || fail "check-updates: rc=$cu_rc"
+
+# Help is reachable through the main `nelly help` dispatch.
+bin/nelly help check-updates | grep -q 'check-updates' \
+    && pass "nelly help check-updates renders" || fail "no help block"
+
+# Status works without a timer installed and doesn't error.
+bin/nelly check-updates status >/dev/null 2>&1 \
+    && pass "check-updates status runs (no timer)" || fail "status broken"
+
+# The bot module imports cleanly with both new commands wired.
+NELLY_ROOT="$(pwd)" python3 - <<'PY' && pass "bot wired for /update + /update_check" || fail "bot wiring broken"
+import sys; sys.path.insert(0, 'lib')
+import bot
+assert 'update_check' in bot.COMMANDS
+assert 'update' in bot.COMMANDS
+assert bot.COMMANDS['update_check'][1] is False  # read-only
+assert bot.COMMANDS['update'][1] is True         # write
+assert bot.CONFIRM_VERB.get('up') == 'update'
+assert bot.CB_ALIASES.get('uc') == 'update_check'
+assert bot.CB_ALIASES.get('up') == 'update'
+assert '/update' in bot.HELP_WRITE
+assert '/update_check' in bot.HELP_READ
+PY
+
+# Bogus subcommand is rejected.
+if bin/nelly check-updates not-a-real-sub >/dev/null 2>&1; then
+    fail "bogus check-updates subcommand was accepted"
+else
+    pass "bogus check-updates subcommand rejected"
+fi
+
+# ----------------------------------------------------------------------------
 section "all (multi-deployment)"
 bin/nelly all list >/dev/null 2>&1 && pass "all list runs" || fail "all list"
 all_out="$(bin/nelly all list --tag prod)"

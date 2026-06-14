@@ -60,6 +60,7 @@ $(_bold "Monitor from your phone")
 
 $(_bold "Stay current")
   $(_bold "nelly update")               $(_dim "# pull latest, smoke-test, restart bot + redeploy as needed")
+  $(_bold "nelly check-updates")        $(_dim "# is the upstream branch ahead? (--notify pings the bot)")
 
 $(_bold "Prefer to edit config.json directly?") That's also fine — config is the source of truth.
   $(_bold "nelly edit    <name>")       $(_dim "# opens \$EDITOR; validates on save")
@@ -187,6 +188,10 @@ $(_bold "TELEGRAM BOT")  $(_dim "(secure remote monitoring + lifecycle from your
 $(_bold "MAINTENANCE")
   update          [--check]             Pull latest Nelly, smoke-test, restart bot + redeploy
                                          as needed (one command for the whole upgrade)
+  check-updates   [check|status|install-timer|uninstall-timer]
+                                         Watch the upstream branch; with --notify, ping the
+                                         Telegram bot when there's a new commit. install-timer
+                                         enables a systemd --user timer that does this hourly.
 
 $(_bold "GLOBAL FLAGS")
   --json                   machine-readable output where supported
@@ -425,6 +430,31 @@ Examples:
    $(_bold 'nelly update')              # interactive (prompts before each step)
    $(_bold 'nelly -y update')           # do everything without asking
    $(_bold 'nelly update --check')      # show plan, change nothing
+EOF
+            ;;
+        check-updates) cat <<EOF
+$(_bold "nelly check-updates <sub> ...")
+
+Polls the upstream branch for new commits and, optionally, pings the Telegram
+bot so the operator can decide whether to apply them. The bot exposes
+/update_check (preview) and /update (apply) for the response side.
+
+   check                       Print status. Exit 0 if up-to-date, 1 if
+                               behind, 2 on error (network, no upstream).
+   check --notify              Same, plus send ONE Telegram message if
+                               behind. Idempotent — the same SHA is not
+                               re-notified on every tick.
+   check --branch NAME         Watch a different branch than the one
+                               checked out. (NELLY_UPDATE_BRANCH env var
+                               also works.) Note: \`nelly update\` still
+                               pulls the currently-checked-out branch, so
+                               only override if you'll switch first.
+   install-timer [--every D]   Install a systemd --user timer that runs
+                               \`check --notify\` on a schedule (default 1h).
+   uninstall-timer
+   status                      Show timer state + last-notified SHA.
+
+State file: $(_bold "\$NELLY_ROOT/.update-check.state")  (one line, the last-notified SHA)
 EOF
             ;;
         bot) cat <<EOF
@@ -835,6 +865,14 @@ case "$cmd" in
     # ---- maintenance ---------------------------------------------------
     update)
         "$LIB/update.sh" "$@" ;;
+
+    check-updates)
+        sub="${1:-check}"; shift || true
+        case "$sub" in
+            check|install-timer|uninstall-timer|status|help|-h|--help|"")
+                "$LIB/check-updates.sh" "$sub" "$@" ;;
+            *) err "unknown check-updates sub: $sub"; echo "Try: nelly help check-updates" >&2; exit 2 ;;
+        esac ;;
 
     *)
         err "unknown command: $cmd"
