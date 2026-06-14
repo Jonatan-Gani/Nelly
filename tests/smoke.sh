@@ -503,6 +503,14 @@ bin/nelly check-updates check >/dev/null 2>&1 || cu_rc=$?
     && pass "check-updates exits 0/1/2 cleanly (got $cu_rc)" \
     || fail "check-updates: rc=$cu_rc"
 
+# The timer invokes `check-updates --notify` (no explicit subcommand). The
+# leading flag must route to `check`, not be mistaken for a subcommand.
+cu_n_rc=0
+bin/nelly check-updates --notify >/dev/null 2>&1 || cu_n_rc=$?
+(( cu_n_rc == 0 || cu_n_rc == 1 || cu_n_rc == 2 )) \
+    && pass "check-updates --notify (timer form) routes to check (got $cu_n_rc)" \
+    || fail "check-updates --notify: rc=$cu_n_rc (leading flag mis-parsed as sub?)"
+
 # Help is reachable through the main `nelly help` dispatch.
 bin/nelly help check-updates | grep -q 'check-updates' \
     && pass "nelly help check-updates renders" || fail "no help block"

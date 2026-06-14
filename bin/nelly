@@ -867,11 +867,22 @@ case "$cmd" in
         "$LIB/update.sh" "$@" ;;
 
     check-updates)
-        sub="${1:-check}"; shift || true
-        case "$sub" in
-            check|install-timer|uninstall-timer|status|help|-h|--help|"")
+        # `check` is the default subcommand. Accept it three ways:
+        #   nelly check-updates                  → check
+        #   nelly check-updates --notify         → check --notify  (timer form)
+        #   nelly check-updates check --notify   → check --notify  (explicit)
+        # A leading flag (-*) means the user omitted the subcommand, so route
+        # to `check` and pass the flag through rather than mistaking it for a sub.
+        case "${1:-}" in
+            -h|--help|help)
+                "$LIB/check-updates.sh" help ;;
+            ""|check|install-timer|uninstall-timer|status)
+                sub="${1:-check}"; shift || true
                 "$LIB/check-updates.sh" "$sub" "$@" ;;
-            *) err "unknown check-updates sub: $sub"; echo "Try: nelly help check-updates" >&2; exit 2 ;;
+            -*)
+                "$LIB/check-updates.sh" check "$@" ;;
+            *)
+                err "unknown check-updates sub: $1"; echo "Try: nelly help check-updates" >&2; exit 2 ;;
         esac ;;
 
     *)
