@@ -815,11 +815,12 @@ if NELLY_ROOT="$(mktemp -d)" python3 - <<'PY' 2>/dev/null; then
 import sys
 sys.path.insert(0, "lib")
 import bot
-assert bot.state_marker("exited") == "[FAIL]" and bot.state_marker("running") == "[OK]"
+assert bot.state_dot("exited") == "🔴" and bot.state_dot("running") == "🟢"
 rows = bot.kbd_for_deployment("x", True)
 assert all(len(r) <= 2 for r in rows), "keyboard rows must be <=2 wide"
 labels = {l: d for r in rows for (l, d) in r}
 assert labels["Stop"] == "cf|st|x" and labels["Deploy"] == "cf|dp|x", "destructive taps must confirm"
+assert labels["« Menu"] == "start", "every screen needs a way back to the menu"
 _txt, kb = bot.cmd_confirm(["st", "x"], False)
 flat = [(b["text"], b["callback_data"]) for row in kb for b in row]
 assert any(t.startswith("Yes") and d == "st|x" for t, d in flat), "confirm Yes replays the op"
@@ -832,9 +833,11 @@ assert "unknown command" in bot._dispatch({"allow_writes": True, "allowed_users"
 htxt, _hk = bot._split_resp(bot.cmd_help([], True))
 assert "Nelly bot" in htxt, "help must render"
 bot.run_nelly = lambda *a, **k: (0, '[{"deployment":"ok1","state":"running"},{"deployment":"bad1","state":"exited"}]')
-dtxt, _dk = bot._split_resp(bot.cmd_start([], True))
-assert "[WARN]" in dtxt and "[FAIL] bad1" in dtxt, "dashboard must surface failures"
-assert dtxt.index("bad1") < dtxt.index("ok1"), "failed deployments must sort first"
+dtxt, dk = bot._split_resp(bot.cmd_start([], True))
+assert "🔴" in dtxt and "bad1" in dtxt, "menu must surface the failing deployment"
+assert "ok1" not in dtxt, "healthy deployments stay out of the menu text"
+btn_labels = [bn["text"] for row in dk for bn in row]
+assert btn_labels.index("bad1") < btn_labels.index("ok1"), "failed deployments must sort first"
 PY
     pass "bot.py logic (keyboards/confirm/gating)"
 else

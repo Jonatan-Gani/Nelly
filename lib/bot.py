@@ -11,11 +11,15 @@ Every response is designed to fit a phone screen in portrait mode:
     so columns line up identically on every Telegram client).
   - Lines are kept to ~38 characters or less so they don't wrap on
     typical phone widths.
-  - No emoji. Status is conveyed with plain words ("running", "failed")
-    and text markers like [OK] / [WARN] / [FAIL] in checklist views.
-  - Most messages have an inline keyboard with the obvious next actions
-    (drill into a deployment, refresh, restart, etc.) so the user
-    doesn't have to type commands.
+  - Status is conveyed with colored dots on header/list lines
+    (🟢 ok / 🟡 warn / 🔴 fail / ⚪ off); numeric content stays inside
+    <pre> blocks with no emoji so monospace columns line up identically
+    on every Telegram client.
+  - Layout is menu-first: /start is a slim main menu (verdict + only the
+    deployments needing attention + buttons), the full command reference
+    lives in /help, and every screen carries a "Menu" button so there is
+    always a clear way back. Most messages have an inline keyboard with
+    the obvious next actions so the user rarely has to type commands.
 
 Security model
 --------------
@@ -211,35 +215,21 @@ def fmt_ts(ts: str) -> str:
     m = re.match(r"^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2})", ts)
     return f"{m.group(1)} {m.group(2)}" if m else ts
 
-def fmt_age_from_iso(ts: str) -> str:
-    """ISO timestamp -> '5m ago' / '2h ago' / '3d ago'. '-' if missing."""
-    if not ts: return "-"
-    try:
-        dt = datetime.datetime.fromisoformat(ts.replace("Z", "+00:00"))
-        now = datetime.datetime.now(datetime.timezone.utc)
-        delta = (now - dt).total_seconds()
-    except Exception:
-        return "-"
-    if delta < 60:    return "just now"
-    if delta < 3600:  return f"{int(delta/60)}m ago"
-    if delta < 86400: return f"{int(delta/3600)}h ago"
-    return f"{int(delta/86400)}d ago"
-
 def trunc(s: str, n: int) -> str:
     if s is None: return ""
     s = str(s)
     return s if len(s) <= n else s[: max(0, n - 3)] + "..."
 
-def state_marker(state: str) -> str:
-    """Text status marker (no emoji) for a deployment state."""
+def state_dot(state: str) -> str:
+    """Colored status dot for a deployment state."""
     return {
-        "running":    "[OK]",
-        "unhealthy":  "[WARN]",
-        "restarting": "[WARN]",
-        "exited":     "[FAIL]",
-        "dead":       "[FAIL]",
-        "absent":     "[OFF]",
-    }.get(state, "[??]")
+        "running":    "🟢",
+        "unhealthy":  "🟡",
+        "restarting": "🟡",
+        "exited":     "🔴",
+        "dead":       "🔴",
+        "absent":     "⚪",
+    }.get(state, "⚫")
 
 # ---------------------------------------------------------------------------
 # layout primitives
@@ -307,7 +297,8 @@ def kbd(*rows: list[tuple[str, str]]) -> list[list[dict]]:
 
 def kbd_for_deployment(n: str, allow_writes: bool) -> list[list[tuple[str, str]]]:
     """The standard action keyboard for a single deployment, 2 buttons wide.
-    Destructive actions route through a confirmation step (cf|<op>|...)."""
+    Destructive actions route through a confirmation step (cf|<op>|...).
+    Always ends with a nav row so there's a clear way back."""
     rows = [
         [("Logs",     f"lg|{n}"), ("Metrics",  f"m|{n}")],
         [("Cron",     f"c|{n}"),  ("Releases", f"rs|{n}")],
@@ -318,6 +309,7 @@ def kbd_for_deployment(n: str, allow_writes: bool) -> list[list[tuple[str, str]]
             [("Restart", f"cf|re|{n}"), ("Stop", f"cf|st|{n}")],
             [("Deploy",  f"cf|dp|{n}")],
         ]
+    rows.append([("« Menu", "start"), ("Deployments", "ls")])
     return rows
 
 # ---------------------------------------------------------------------------
@@ -365,31 +357,14 @@ def _split_resp(resp: Response) -> tuple[str, list | None]:
 # /start — dashboard
 # ---------------------------------------------------------------------------
 
-def _latest_release_info(deployment: str) -> tuple[str, str, str] | None:
-    """Read the latest entry from def/releases.index.json.
-    Returns (release_id, outcome, age_text) or None."""
-    idx = NELLY_ROOT / "containers" / deployment / "def" / "releases.index.json"
-    if not idx.is_file():
-        return None
-    try:
-        data = json.loads(idx.read_text())
-        releases = data.get("releases") or []
-        if not releases:
-            return None
-        last = releases[-1]
-        rel_id = last.get("release_id", "?")
-        outcome = last.get("outcome", "?")
-        ts = last.get("finalized_at") or last.get("created_at") or ""
-        return rel_id, outcome, fmt_age_from_iso(ts)
-    except Exception as e:
-        log.warning("could not read releases index for %s: %s", deployment, e)
-        return None
-
 _SEVERITY = {"exited": 0, "dead": 0, "unhealthy": 1, "restarting": 1, "absent": 2, "running": 3}
 
 def cmd_start(_args, allow_writes, **_) -> Response:
-    """First-touch view: health verdict + per-deployment one-liner + buttons.
-    Deployments are ordered worst-first so problems sit at the top."""
+    """Main menu. Kept deliberately short: a one-line health verdict, only the
+    deployments that actually need attention, a single compact counts line, and
+    a button menu. Healthy deployments stay out of the text — they're one tap
+    away via their own button or the Deployments list. Worst-first ordering puts
+    any problem at the top of both the text and the buttons."""
     rc, raw = run_nelly("list", json_output=True)
     items: list[dict] = []
     if rc == 0:
@@ -399,53 +374,44 @@ def cmd_start(_args, allow_writes, **_) -> Response:
             items = []
     items.sort(key=lambda d: (_SEVERITY.get(d.get("state", ""), 2), d.get("deployment", "")))
 
-    n_total      = len(items)
-    n_running    = sum(1 for d in items if d.get("state") == "running")
-    n_unhealthy  = sum(1 for d in items if d.get("state") in ("unhealthy", "restarting"))
-    n_failed     = sum(1 for d in items if d.get("state") in ("exited", "dead"))
-    n_absent     = sum(1 for d in items if d.get("state") == "absent")
+    n_total     = len(items)
+    n_running   = sum(1 for d in items if d.get("state") == "running")
+    n_unhealthy = sum(1 for d in items if d.get("state") in ("unhealthy", "restarting"))
+    n_failed    = sum(1 for d in items if d.get("state") in ("exited", "dead"))
+    n_absent    = sum(1 for d in items if d.get("state") == "absent")
 
-    out = [b(f"Nelly — {HOST_NAME}")]
+    out = [b(f"Nelly · {HOST_NAME}")]
 
-    if n_total:
-        if n_failed or n_unhealthy:
-            bits = []
-            if n_failed:    bits.append(f"{n_failed} failed")
-            if n_unhealthy: bits.append(f"{n_unhealthy} unhealthy")
-            verdict = "[WARN] " + ", ".join(bits)
-        elif n_absent:
-            verdict = f"[OFF] {n_absent} not deployed"
-        else:
-            verdict = "[OK] all running"
-        out += [b(verdict), ""]
+    if not n_total:
+        out += ["", i_("No deployments yet."),
+                i_("Run  nelly init <name>  on the host.")]
+        return "\n".join(out), kbd([("Help", "help")])
+
+    # One-line verdict.
+    if n_failed or n_unhealthy:
+        bits = []
+        if n_failed:    bits.append(f"🔴 {n_failed} failed")
+        if n_unhealthy: bits.append(f"🟡 {n_unhealthy} unhealthy")
+        out.append("  ".join(bits))
+    elif n_absent:
+        out.append(f"⚪ {n_absent} not deployed")
     else:
-        out.append("")
+        out.append("🟢 all healthy")
 
-    out.append(section("Summary", kv([
-        ("deployments", n_total),
-        ("running",     n_running),
-        ("unhealthy",   n_unhealthy if n_unhealthy else None),
-        ("failed",      n_failed if n_failed else None),
-        ("absent",      n_absent if n_absent else None),
-    ])))
+    # Only the deployments that need attention, named.
+    trouble = [d for d in items
+               if d.get("state") in ("exited", "dead", "unhealthy", "restarting")]
+    if trouble:
+        lines = [f"{state_dot(d.get('state',''))} {b(trunc(d.get('deployment','?'), 20))}"
+                 f"  {esc(d.get('state',''))}"
+                 for d in trouble]
+        out += ["", b("Needs attention"), *lines]
 
-    if items:
-        deploy_blocks = []
-        for d in items:
-            dep   = d.get("deployment", "?")
-            state = d.get("state", "?")
-            line1 = f"{state_marker(state)} {trunc(dep, 16)}  ({state})"
-            rel = _latest_release_info(dep)
-            if rel:
-                rel_id, outcome, age = rel
-                deploy_blocks.append(f"{line1}\n  last: {rel_id} {outcome}  {age}")
-            else:
-                deploy_blocks.append(line1)
-        out += ["", section("Deployments", "\n\n".join(deploy_blocks))]
-    else:
-        out += ["", i_("no deployments yet — run `nelly init <name>` on the host")]
+    # One compact counts line instead of a multi-row summary block.
+    out += ["", i_(f"{n_total} deployments · {n_running} running")]
 
-    # Buttons: one per deployment (up to 8), 2 wide, worst-first order.
+    # Buttons: quick-access per deployment (worst-first, up to 8, 2 wide),
+    # then a fixed nav menu.
     kbd_rows: list[list[tuple[str, str]]] = []
     row: list[tuple[str, str]] = []
     for d in items[:8]:
@@ -455,6 +421,7 @@ def cmd_start(_args, allow_writes, **_) -> Response:
         if len(row) == 2:
             kbd_rows.append(row); row = []
     if row: kbd_rows.append(row)
+    kbd_rows.append([("Deployments", "ls"), ("Live stats", "stats")])
     kbd_rows.append([("Refresh", "start"), ("Help", "help")])
 
     return "\n".join(out), kbd(*kbd_rows)
@@ -463,40 +430,57 @@ def cmd_start(_args, allow_writes, **_) -> Response:
 # /help
 # ---------------------------------------------------------------------------
 
+# <n> = deployment name.  Grouped so the list is scannable, not a wall.
 HELP_READ = """\
-/start            dashboard (you're here)
-/list             deployments
-/status   <n>     one deployment
-/ps               containers
-/stats            cpu/mem/pids
-/logs     <n>     last cron output
-/cron     <n>     schedules
-/explain  <n>     summary
-/doctor   <n>     pre-flight check
-/events   <n>     docker events
-/releases <n>     deploy history
-/release  <n>     release manifest
-/metrics  <n>     run stats
-/update_check     check if upstream branch has new commits
-/id               your user id"""
+Navigate
+  /start            main menu
+  /list             all deployments
+  /status   <n>     one deployment
+
+Monitor
+  /ps               running containers
+  /stats            cpu / mem / pids
+  /logs     <n>     last cron output
+  /metrics  <n>     run statistics
+  /events   <n>     docker events
+
+Inspect
+  /cron     <n>     schedules
+  /explain  <n>     plain summary
+  /doctor   <n>     pre-flight check
+  /releases <n>     deploy history
+  /release  <n>     release manifest
+
+System
+  /update_check     upstream updates?
+  /id               your user id"""
 
 HELP_WRITE = """\
-/start_dep        <n>
-/stop_dep         <n>
-/restart_dep      <n>
-/runnow           <n> <app>
-/deploy           <n>
-/rollback         <n>
-/release_restore  <n> <id>
-/update           apply pending upstream updates"""
+Deploy
+  /deploy           <n>
+  /rollback         <n>
+  /release_restore  <n> <id>
+  /update           apply updates
+
+Lifecycle
+  /start_dep        <n>
+  /stop_dep         <n>
+  /restart_dep      <n>
+  /runnow           <n> <app>"""
 
 def cmd_help(_args, allow_writes, **_) -> Response:
-    parts = [b("Nelly bot"), "", section("Read-only", HELP_READ)]
+    parts = [
+        b("Nelly bot · commands"),
+        i_("Most screens have buttons — tap instead of typing."),
+        "",
+        section("Read-only", HELP_READ),
+    ]
     if allow_writes:
-        parts += ["", section("Write", HELP_WRITE)]
-    parts += ["", i_("tip: most messages have buttons — tap instead of typing.")]
-    return "\n".join(p for p in parts if p), kbd(
-        [("Dashboard", "start"), ("List", "ls")],
+        parts += ["", section("Write actions", HELP_WRITE)]
+    else:
+        parts += ["", i_("Write actions are off (allow_writes: false).")]
+    return "\n".join(parts), kbd(
+        [("« Menu", "start"), ("Deployments", "ls")],
     )
 
 def cmd_id(_args, _aw, *, user_id: int = 0, **_) -> str:
@@ -514,17 +498,20 @@ def cmd_list(_args, allow_writes, **_) -> Response:
     except Exception:
         return fmt_err(1, raw)
     if not items:
-        return f"{b('Deployments')}\n{pre('(none)')}"
-    cards = []
+        return f"{b('Deployments')}\n{i_('(none)')}", kbd([("« Menu", "start")])
+    items.sort(key=lambda d: (_SEVERITY.get(d.get("state", ""), 2), d.get("deployment", "")))
+
+    blocks = []
     for d in items:
         name  = trunc(d.get("deployment", "?"), 22)
         state = d.get("state", "?")
-        cards.append(card(
-            f"{name}  ({state})",
-            [("apps",  d.get("apps", 0)),
-             ("image", short_image(d.get("image", "")))],
-        ))
-    text = section("Deployments", "\n\n".join(cards))
+        apps  = d.get("apps", 0)
+        img   = short_image(d.get("image", ""))
+        blocks.append(
+            f"{state_dot(state)} {b(name)}  {esc(state)}\n"
+            f"{code(f'{apps} apps · {img}')}"
+        )
+    text = b("Deployments") + "\n\n" + "\n\n".join(blocks)
 
     # Buttons: one per deployment (up to 8), 2 wide.
     rows: list[list[tuple[str, str]]] = []
@@ -536,8 +523,15 @@ def cmd_list(_args, allow_writes, **_) -> Response:
         if len(row) == 2:
             rows.append(row); row = []
     if row: rows.append(row)
-    rows.append([("Dashboard", "start"), ("Refresh", "ls")])
+    rows.append([("« Menu", "start"), ("Refresh", "ls")])
     return text, kbd(*rows)
+
+def _ps_dot(status: str) -> str:
+    """Status dot from a docker status string (e.g. 'Up 3h', 'Exited (0) …')."""
+    if "unhealthy" in status:        return "🟡"
+    if status.startswith("Up"):      return "🟢"
+    if status.startswith(("Exited", "Dead")): return "🔴"
+    return "⚪"
 
 def cmd_ps(_args, _aw, **_) -> Response:
     rc, raw = run_nelly("ps", json_output=True)
@@ -547,8 +541,8 @@ def cmd_ps(_args, _aw, **_) -> Response:
     except Exception:
         return fmt_err(1, raw)
     if not items:
-        return f"{b('Containers')}\n{pre('(none running)')}"
-    cards = []
+        return f"{b('Containers')}\n{i_('(none running)')}", kbd([("« Menu", "start")])
+    blocks = []
     for c in items:
         labels = c.get("Labels", "")
         deployment = next(
@@ -556,14 +550,14 @@ def cmd_ps(_args, _aw, **_) -> Response:
              if kv_str.startswith("nelly.deployment=")),
             c.get("Names", "?"),
         )
-        status = trunc(c.get("Status", ""), 30)
-        cards.append(card(
-            trunc(deployment, 22),
-            [("status", status),
-             ("image",  short_image(c.get("Image", "")))],
-        ))
-    return section("Containers", "\n\n".join(cards)), kbd(
-        [("Dashboard", "start"), ("Refresh", "ps")],
+        status = c.get("Status", "")
+        blocks.append(
+            f"{_ps_dot(status)} {b(trunc(deployment, 22))}\n"
+            f"{code(trunc(status, 34))}\n"
+            f"{code(short_image(c.get('Image', '')))}"
+        )
+    return b("Containers") + "\n\n" + "\n\n".join(blocks), kbd(
+        [("« Menu", "start"), ("Refresh", "ps")],
     )
 
 def cmd_stats(_args, _aw, **_) -> Response:
@@ -574,18 +568,20 @@ def cmd_stats(_args, _aw, **_) -> Response:
     except Exception:
         return fmt_err(1, raw)
     if not items:
-        return f"{b('Live stats')}\n{pre('(no running containers)')}"
-    cards = []
+        return f"{b('Live stats')}\n{i_('(no running containers)')}", kbd([("« Menu", "start")])
+    blocks = []
     for s in items:
-        cards.append(card(
-            trunc(s.get("Name", "?"), 22),
-            [("cpu",  s.get("CPUPerc", "?")),
-             ("mem",  s.get("MemPerc", "?")),
-             ("size", trunc(s.get("MemUsage", "?"), 30)),
-             ("pids", s.get("PIDs", "?"))],
-        ))
-    return section("Live stats", "\n\n".join(cards)), kbd(
-        [("Dashboard", "start"), ("Refresh", "stats")],
+        cpu  = s.get("CPUPerc", "?")
+        memp = s.get("MemPerc", "?")
+        memu = trunc(s.get("MemUsage", "?"), 28)
+        pids = s.get("PIDs", "?")
+        blocks.append(
+            f"{b(trunc(s.get('Name', '?'), 22))}\n"
+            f"{code(f'cpu {cpu}  ·  mem {memp}')}\n"
+            f"{code(f'{memu}  ·  pids {pids}')}"
+        )
+    return b("Live stats") + "\n\n" + "\n\n".join(blocks), kbd(
+        [("« Menu", "start"), ("Refresh", "stats")],
     )
 
 # ---------------------------------------------------------------------------
@@ -608,7 +604,8 @@ def cmd_status(args, allow_writes, **_) -> Response:
     except Exception:
         return fmt_err(1, raw)
 
-    out = [b(f"{n}  ({d.get('state','?')})"), ""]
+    state = d.get("state", "?")
+    out = [f"{state_dot(state)} {b(n)}  {esc(state)}", ""]
 
     summary_pairs = [
         ("container", d.get("container", n)),
@@ -658,7 +655,7 @@ def cmd_cron(args, _aw, **_) -> Response:
         return fmt_err(1, raw)
     if not items:
         return f"{b(f'{n} - schedules')}\n{pre('(no apps)')}", kbd(
-            [("Status", f"s|{n}"), ("Dashboard", "start")],
+            [("Status", f"s|{n}"), ("« Menu", "start")],
         )
 
     cards = []
@@ -676,7 +673,7 @@ def cmd_cron(args, _aw, **_) -> Response:
         cards.append(card(trunc(it.get("app", "?"), 22), pairs))
     return section(f"{n} - schedules", "\n\n".join(cards)), kbd(
         [("Status", f"s|{n}"), ("Metrics", f"m|{n}")],
-        [("Refresh", f"c|{n}")],
+        [("Refresh", f"c|{n}"), ("« Menu", "start")],
     )
 
 def cmd_metrics(args, _aw, **_) -> Response:
@@ -700,6 +697,7 @@ def cmd_metrics(args, _aw, **_) -> Response:
     if not items:
         return f"{b(f'{n} - metrics{label}')}\n{pre('(no runs yet)')}", kbd(
             [("Status", f"s|{n}"), ("Cron", f"c|{n}")],
+            [("« Menu", "start")],
         )
 
     cards = []
@@ -707,8 +705,8 @@ def cmd_metrics(args, _aw, **_) -> Response:
         runs = s.get("runs", 0)
         ok   = s.get("success", 0)
         fl   = s.get("failed", 0)
-        status = "[OK]" if fl == 0 else ("[WARN]" if ok > fl else "[FAIL]")
-        title = f"{trunc(s.get('app', '?'), 20)}  {status}"
+        status = "🟢" if fl == 0 else ("🟡" if ok > fl else "🔴")
+        title = f"{status} {trunc(s.get('app', '?'), 20)}"
         line_counts = f"runs:{runs:>3}   ok:{ok:>3}   fail:{fl:>3}"
         avg = s.get("avg_dur_s", 0)
         p95 = s.get("p95_dur_s", 0) or 0
@@ -720,7 +718,7 @@ def cmd_metrics(args, _aw, **_) -> Response:
         cards.append(body)
     return section(f"{n} - metrics{label}", "\n\n".join(cards)), kbd(
         [("Status", f"s|{n}"), ("24h", f"m|{n}|24h")],
-        [("Refresh", f"m|{n}")],
+        [("Refresh", f"m|{n}"), ("« Menu", "start")],
     )
 
 # ---------------------------------------------------------------------------
@@ -738,7 +736,7 @@ def cmd_releases(args, allow_writes, **_) -> Response:
         return fmt_err(1, raw)
     if not items:
         return f"{b(f'{n} - releases')}\n{pre('(no releases yet)')}", kbd(
-            [("Status", f"s|{n}")],
+            [("Status", f"s|{n}"), ("« Menu", "start")],
         )
     recent = list(reversed(items))[:10]
     rows = [
@@ -763,6 +761,7 @@ def cmd_releases(args, allow_writes, **_) -> Response:
             kbd_rows.append(row); row = []
     if row: kbd_rows.append(row)
     kbd_rows.append([("Status", f"s|{n}"), ("Refresh", f"rs|{n}")])
+    kbd_rows.append([("« Menu", "start")])
     return text, kbd(*kbd_rows)
 
 def cmd_release(args, allow_writes, **_) -> Response:
@@ -805,6 +804,7 @@ def cmd_release(args, allow_writes, **_) -> Response:
     rows = [[("All releases", f"rs|{n}"), ("Status", f"s|{n}")]]
     if allow_writes:
         rows.append([("Restore this", f"cf|rr|{n}|{rel_id}")])
+    rows.append([("« Menu", "start")])
     return "\n".join(out), kbd(*rows)
 
 # ---------------------------------------------------------------------------
@@ -816,12 +816,13 @@ def cmd_doctor(args, _aw, **_) -> Response:
     if err: return err
     rc, raw = run_nelly("doctor", n)
     clean = re.sub(r"\x1b\[[0-9;]*m", "", raw or "")
-    clean = clean.replace("  ✓ ", "  [OK]   ")
-    clean = clean.replace("  ! ", "  [WARN] ")
-    clean = clean.replace("  ✗ ", "  [FAIL] ")
+    clean = clean.replace("  ✓ ", "  🟢 ")
+    clean = clean.replace("  ! ", "  🟡 ")
+    clean = clean.replace("  ✗ ", "  🔴 ")
     return (
         f"{b(f'{n} - pre-flight check')}\n{pre(clean.rstrip() or '(no output)')}",
-        kbd([("Status", f"s|{n}"), ("Refresh", f"d|{n}")]),
+        kbd([("Status", f"s|{n}"), ("Refresh", f"d|{n}")],
+            [("« Menu", "start")]),
     )
 
 def cmd_explain(args, _aw, **_) -> Response:
@@ -832,7 +833,7 @@ def cmd_explain(args, _aw, **_) -> Response:
     if rc != 0: return fmt_err(rc, clean)
     return (
         f"{b(f'{n} - summary')}\n{pre(clean or '(no output)')}",
-        kbd([("Status", f"s|{n}")]),
+        kbd([("Status", f"s|{n}"), ("« Menu", "start")]),
     )
 
 def cmd_events(args, _aw, **_) -> Response:
@@ -865,7 +866,7 @@ def cmd_events(args, _aw, **_) -> Response:
     body = "\n".join(lines) or "(no events)"
     return (
         f"{b(f'{n} - events (last hr)')}\n{pre(body)}",
-        kbd([("Status", f"s|{n}")]),
+        kbd([("Status", f"s|{n}"), ("« Menu", "start")]),
     )
 
 def cmd_logs(args, _aw, **_) -> Response:
@@ -884,7 +885,8 @@ def cmd_logs(args, _aw, **_) -> Response:
             return f"failed to tail log: {esc(e)}"
         return (
             f"{b(f'{n} / {app}')}\n{pre(tail.rstrip() or '(empty)')}",
-            kbd([("Status", f"s|{n}"), ("Refresh", f"lg|{n}|{app}")]),
+            kbd([("Status", f"s|{n}"), ("Refresh", f"lg|{n}|{app}")],
+                [("« Menu", "start")]),
         )
 
     if not log_path.is_dir():
@@ -902,7 +904,8 @@ def cmd_logs(args, _aw, **_) -> Response:
         return f"no log lines yet for {esc(n)}"
     return (
         f"{b(n)}\n\n" + "\n\n".join(chunks),
-        kbd([("Status", f"s|{n}"), ("Refresh", f"lg|{n}")]),
+        kbd([("Status", f"s|{n}"), ("Refresh", f"lg|{n}")],
+            [("« Menu", "start")]),
     )
 
 # ---------------------------------------------------------------------------
@@ -979,12 +982,12 @@ def cmd_update_check(_args, allow_writes, **_) -> Response:
     rc, raw = run_nelly("check-updates", "check")
     body = (raw or "").rstrip() or "(no output)"
     if rc == 0:
-        return f"{b('up to date')}\n{pre(body[-1500:])}"
+        return f"{b('up to date')}\n{pre(body[-1500:])}", kbd([("« Menu", "start")])
     if rc == 1:
         rows = []
         if allow_writes:
             rows.append([("Update now", "cf|up")])
-        rows.append([("Dashboard", "start"), ("Status", "check_updates")])
+        rows.append([("« Menu", "start"), ("Re-check", "uc")])
         return f"{b('updates available')}\n{pre(body[-1500:])}", kbd(*rows)
     return f"{b('check failed')}  exit {rc}\n{pre(body[-1500:])}"
 
@@ -998,7 +1001,7 @@ def cmd_update(_args, _aw, **_) -> Response:
     if rc == 0:
         return (
             f"{b('update OK')}\n{pre(tail)}",
-            kbd([("Dashboard", "start"), ("List", "ls")]),
+            kbd([("« Menu", "start"), ("Deployments", "ls")]),
         )
     return fmt_err(rc, raw)
 
