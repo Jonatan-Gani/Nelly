@@ -934,32 +934,47 @@ nelly bot status                 # is it running? recent activity?
 
 ### Bot commands (from Telegram)
 
+The interface is menu-first: `/start` is the main menu (a one-line health
+verdict, only the deployments that need attention, and buttons), and most
+replies carry an inline keyboard — every screen has a **« Menu** button — so
+you rarely have to type. `/help` is the full command reference.
+
 Read-only (always available):
 
-| Command            | What it does                              |
-| ------------------ | ----------------------------------------- |
-| `/help`            | List available commands                   |
-| `/list`            | All deployments + state                   |
-| `/status <name>`   | One deployment's status                   |
-| `/ps`              | docker ps over nelly-managed containers   |
-| `/stats`           | live cpu / memory / pids                  |
-| `/logs <name> [app]` | Last 30 lines of cron output            |
-| `/cron <name>`     | What's scheduled, in plain English        |
-| `/explain <name>`  | Deployment summary                        |
-| `/doctor <name>`   | Pre-flight checks                         |
-| `/events <name>`   | Recent docker events                      |
-| `/id`              | Print your own Telegram user id           |
+| Command              | What it does                              |
+| -------------------- | ----------------------------------------- |
+| `/start`             | Main menu — health + what needs attention |
+| `/help`              | Full command list                         |
+| `/list`              | All deployments + state                   |
+| `/status <name>`     | One deployment's status                   |
+| `/ps`                | docker ps over nelly-managed containers   |
+| `/stats`             | live cpu / memory / pids                  |
+| `/logs <name> [app]` | Last lines of cron output                 |
+| `/metrics <name>`    | Per-app run statistics                    |
+| `/cron <name>`       | What's scheduled, in plain English        |
+| `/explain <name>`    | Deployment summary                        |
+| `/doctor <name>`     | Pre-flight checks                         |
+| `/events <name>`     | Recent docker events                      |
+| `/releases <name>`   | Deploy history                            |
+| `/release <name>`    | Release manifest                          |
+| `/update_check`      | Check upstream for new commits            |
+| `/id`                | Print your own Telegram user id           |
 
 Write-capable (only when `allow_writes: true` in `bot/config.json`):
 
-| Command                       | What it does                                       |
-| ----------------------------- | -------------------------------------------------- |
-| `/start_dep <name>`           | `docker start`                                     |
-| `/stop_dep <name>`            | `docker stop`                                      |
-| `/restart_dep <name>`         | `docker restart`                                   |
-| `/runnow <name> <app>`        | Trigger one app run immediately                    |
-| `/deploy <name>`              | Full deploy with `--wait-healthy 60 --auto-rollback` |
-| `/rollback <name>`            | Switch to previous build                           |
+| Command                        | What it does                                         |
+| ------------------------------ | ---------------------------------------------------- |
+| `/start_dep <name>`            | `docker start`                                       |
+| `/stop_dep <name>`             | `docker stop`                                        |
+| `/restart_dep <name>`          | `docker restart`                                     |
+| `/runnow <name> <app>`         | Trigger one app run immediately                      |
+| `/deploy <name>`               | Full deploy with `--wait-healthy 60 --auto-rollback` |
+| `/rollback <name>`             | Switch to previous build                             |
+| `/release_restore <name> <id>` | Restore a prior release                              |
+| `/update`                      | Apply pending upstream updates                       |
+
+Destructive button taps (stop / restart / deploy / restore / update) require a
+second confirming tap; typed write commands run immediately.
 
 Toggle writes any time:
 ```sh
