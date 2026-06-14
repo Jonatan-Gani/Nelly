@@ -1,33 +1,59 @@
 {
-  "nelly_config": {
-    "LOCAL_IP": "192.168.10.251"
+  "container_name": "example",
+  "image_name":     "example",
+  "restart":        "unless-stopped",
+  "log_retention_days": 7,
+
+  "tags": [],
+
+  "base_image": "",
+
+  "apps": [],
+
+  "resources": {
+    "cpus":        "1.0",
+    "memory":      "512m",
+    "pids_limit":  256
   },
-  "container_name": "tamar_template",
-  "image_name": "test_image",
-  "apps": [
-    {
-      "app_name": "tamar_template",
-      "git_url": "git@github.com:Jonatan-Gani/tamar_template.git",
-      "branch": "master",
-      "env": {
-        "DB_HOST": "ENV_DB_HOST_tamar_template",
-        "DB_PASS": "ENV_DB_PASS_tamar_template"
-      }
-    }
-  ],
+
+  "health": {
+    "interval":     "30s",
+    "timeout":      "5s",
+    "retries":      3,
+    "start_period": "30s"
+  },
+
   "network": {
-    "network_name": "Nelly_Network",
-    "static_ip": "192.168.20.100",
-    "docker_run_options": "-p 8080:80"
+    "network_name": "nelly_net",
+    "subnet":  "192.168.20.0/24",
+    "gateway": "192.168.20.1",
+    "static_ip": "",
+    "hostname": "",
+    "ports": [],
+    "extra_networks": [],
+    "aliases": [],
+    "dns": [],
+    "extra_hosts": [],
+    "labels": {}
   },
+
+  "volumes": [],
+
+  "hooks": {
+    "pre_deploy":    "",
+    "post_deploy":   "",
+    "on_failure":    "",
+    "pre_snapshot":  "",
+    "post_snapshot": ""
+  },
+
+  "backup": {
+    "skip_volumes": []
+  },
+
   "packages": [
-    "cron",
-    "python3-pip",
     "git",
     "libpq-dev",
-    "gcc",
-    "nano",
-    "bash",
-    "iputils-ping"
+    "gcc"
   ]
 }

@@ -1,0 +1,8 @@
+# Lint config for lib/bot.py — the only Python in the tree.
+#
+# bot.py deliberately uses compact one-line statements (`if cond: return x`,
+# `a; b`) to stay terse, so E701/E702 are ignored. Everything else in ruff's
+# default set stays on — in particular the pyflakes (F) checks that catch the
+# bugs py_compile misses: undefined names, unused imports, bad f-strings, etc.
+[lint]
+ignore = ["E701", "E702"]

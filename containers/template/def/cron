@@ -1,1 +1,2 @@
-* * * * * root echo "Cron is working" >> /var/log/cron_test.log 2>&1
+# This file is no longer used directly. Nelly assembles the container crontab
+# from apps[].schedule + apps[].entrypoint in config.json at build time.
