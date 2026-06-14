@@ -187,7 +187,7 @@ Documentation=https://github.com/Jonatan-Gani/Nelly
 
 [Service]
 Type=oneshot
-ExecStart=$nelly_bin check-updates --notify
+ExecStart=$nelly_bin check-updates check --notify
 # A failed check is not catastrophic — the next tick retries.
 SuccessExitStatus=0 1
 UNIT
